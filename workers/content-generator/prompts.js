@@ -108,7 +108,18 @@ Return ONLY the JSON object. No markdown, no explanation, no code blocks.`;
  * Blog expansion prompt.
  * Takes the anchor article and expands it into a full SEO-optimized blog post.
  */
-function buildBlogExpansionPrompt(vertical, anchorDraft, month, year) {
+function buildBlogExpansionPrompt(vertical, anchorDraft, topics, month, year) {
+  const sourceLinks = [];
+  if (topics.anchor.sourceUrl) {
+    sourceLinks.push(`- Anchor source: ${topics.anchor.sourceUrl} (${topics.anchor.source})`);
+  }
+  topics.radar.forEach(r => {
+    if (r.sourceUrl) sourceLinks.push(`- ${r.headline}: ${r.sourceUrl} (${r.source})`);
+  });
+  if (topics.quickWin.sourceUrl) {
+    sourceLinks.push(`- ${topics.quickWin.headline}: ${topics.quickWin.sourceUrl} (${topics.quickWin.source})`);
+  }
+
   return `Expand the newsletter anchor article below into a full blog post for archificials.com.
 
 ORIGINAL ANCHOR ARTICLE:
@@ -122,6 +133,18 @@ REQUIREMENTS:
 - Add 2-3 additional data points or examples not in the newsletter version
 - Maintain the same tone: ${vertical.tone.summary}
 
+SOURCE LINKS TO EMBED:
+The following verified source URLs MUST be embedded as hyperlinks within the blog body where relevant claims are made. Use <a href="URL" target="_blank">Source Name</a> format.
+
+${sourceLinks.join('\n')}
+
+RULES FOR SOURCE LINKS:
+- Every factual claim or statistic should link to its source
+- Use descriptive anchor text (the publication name or a relevant phrase), NOT "click here" or "source"
+- Links must use target="_blank"
+- Do NOT fabricate or modify URLs. Use ONLY the URLs provided above.
+- If making a claim that is not from the provided sources, do not add a link for it
+
 WRITING RULES (MANDATORY):
 ${BRAND.voice.rules.map(r => `- ${r}`).join('\n')}
 
@@ -129,6 +152,14 @@ CTA BLOCKS TO INCLUDE AT THE END:
 1. Assessment CTA: ${vertical.cta.assessment ? `"${vertical.cta.assessment}" linking to ${vertical.assessmentUrl}` : 'Skip (not available for this vertical)'}
 2. Newsletter subscribe CTA: "Get insights like this delivered bi-weekly, plus tools and tips you will not find on the blog."
 3. Contact CTA: "${vertical.cta.contact}" linking to ${vertical.cta.contactUrl}
+
+FAQ SECTION (for SEO, AEO, and GEO optimization):
+Generate 5 questions and answers related to the blog post content.
+
+- Questions should be natural language queries that a decision-maker in this vertical would search for
+- Answers should be comprehensive (3-5 sentences each), wrapped in <p> tags for RichText
+- Snippets should be concise (2-3 sentences max), plain text only (no HTML), optimized for AI answer engines like ChatGPT, Gemini, and Google AI Overviews
+- Snippets should read as standalone, authoritative answers that an AI could cite directly
 
 BLOG CATEGORY: ${vertical.blogCategory}
 AUTHOR: ${BRAND.founder}, ${BRAND.founderTitle}
@@ -139,12 +170,21 @@ OUTPUT FORMAT: Return ONLY valid JSON:
   "meta_description": "155 chars max",
   "slug": "url-friendly-slug",
   "category": "${vertical.blogCategory}",
-  "html_body": "full blog post in clean HTML (h2, h3, p, a, strong tags only)",
+  "html_body": "full blog post in clean HTML (h2, h3, p, a, strong tags only). MUST contain hyperlinks to sources.",
   "word_count": number,
   "primary_keyword": "the main SEO keyword targeted",
   "assessment_cta_html": "styled CTA block HTML for assessment",
-  "subscribe_cta_html": "styled CTA block HTML for newsletter signup"
+  "subscribe_cta_html": "styled CTA block HTML for newsletter signup",
+  "faq": [
+    {
+      "question": "Natural language question a decision-maker would search for",
+      "answer": "<p>Comprehensive 3-5 sentence answer wrapped in p tags.</p>",
+      "snippet": "Concise 2-3 sentence plain text answer optimized for AI answer engines. No HTML."
+    }
+  ]
 }
+
+The "faq" array MUST contain exactly 5 items.
 
 Return ONLY the JSON object. No markdown, no explanation.`;
 }

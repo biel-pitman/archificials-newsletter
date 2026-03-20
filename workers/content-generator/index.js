@@ -31,7 +31,20 @@ import { buildDraftingPrompt, buildBlogExpansionPrompt } from './prompts';
 
 async function createWebflowBlogDraft(blogPost, vertical, env) {
   const wordCount = blogPost.word_count || 800;
-  const readingTime = `${Math.ceil(wordCount / 250)} min read`;
+  const readingTime = `${Math.ceil(wordCount / 200)} Min Read`;
+
+  // Map FAQ fields to Webflow CMS slugs (note inconsistent naming)
+  const faqFieldData = {};
+  if (blogPost.faq && blogPost.faq.length >= 5) {
+    for (let i = 0; i < 5; i++) {
+      const qNum = i + 1;
+      faqFieldData[`question-${qNum}`] = blogPost.faq[i].question;
+      faqFieldData[`answer-${qNum}`] = blogPost.faq[i].answer;
+      // Snippets: snippet1, snippet2 (no dash), snippet-3, snippet-4, snippet-5 (with dash)
+      const snippetSlug = qNum <= 2 ? `snippet${qNum}` : `snippet-${qNum}`;
+      faqFieldData[snippetSlug] = blogPost.faq[i].snippet;
+    }
+  }
 
   const res = await fetch(`${WEBFLOW.apiBase}/collections/${WEBFLOW.blogCollectionId}/items`, {
     method: 'POST',
@@ -50,7 +63,8 @@ async function createWebflowBlogDraft(blogPost, vertical, env) {
         'blog---category': vertical.blogCategory,
         'blog-post---author': BRAND.founder,
         'blog---author-subtitle': `${BRAND.founderTitle}, ${BRAND.name}`,
-        'blog---reading-time': readingTime
+        'blog---reading-time': readingTime,
+        ...faqFieldData
       }
     })
   });
@@ -338,7 +352,7 @@ async function generateForVertical(vertical, env, options = {}) {
   }
 
   // Step 5: Generate blog expansion
-  const blogPrompt = buildBlogExpansionPrompt(vertical, draft.anchor, month, year);
+  const blogPrompt = buildBlogExpansionPrompt(vertical, draft.anchor, topics, month, year);
   let blogPost = await callClaude(blogPrompt, env.ANTHROPIC_API_KEY);
   blogPost = removeEmDashes(blogPost);
   console.log(`  Blog expansion generated: "${blogPost.seo_title}" (${blogPost.word_count} words)`);
