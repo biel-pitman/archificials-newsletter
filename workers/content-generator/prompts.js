@@ -30,6 +30,8 @@ ${BRAND.voice.principles.map(p => `- ${p}`).join('\n')}
 
 WRITING RULES (MANDATORY):
 ${BRAND.voice.rules.map(r => `- ${r}`).join('\n')}
+- Use the EXACT source URLs provided in the research findings. Do not modify, shorten, or generalize URLs. Every source link must be a full URL that resolves to the specific article, not a homepage or generic domain.
+- Never mention Biel by name in CTAs. Use "our team", "Archificials", or impersonal phrasing.
 
 VERTICAL TONE:
 ${vertical.tone.summary}
@@ -50,9 +52,11 @@ NEWSLETTER STRUCTURE:
    - End with: "${vertical.cta.blog}"
 
 2. THE RADAR (${NEWSLETTER.sections.radar.minWords}-${NEWSLETTER.sections.radar.maxWords} words total)
-   Items: ${topics.radar.map(r => `"${r.headline}" (${r.source})`).join(', ')}
+   Items:
+${topics.radar.map(r => `   - "${r.headline}" (${r.source}) — EXACT URL: ${r.sourceUrl}`).join('\n')}
    - ${NEWSLETTER.sections.radar.items} short paragraphs, each with bold headline
    - Include source context
+   - The source_url field in each radar item MUST be the EXACT URL listed above
 
 3. THE QUICK WIN (${NEWSLETTER.sections.quickWin.minWords}-${NEWSLETTER.sections.quickWin.maxWords} words)
    Tool/Tip: ${topics.quickWin.headline}

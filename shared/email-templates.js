@@ -9,7 +9,7 @@ const { BRAND } = require('./config');
  * Research digest email - sent after research phase completes.
  * Contains top findings per vertical for Biel to review and select topics.
  */
-function researchDigestEmail({ month, year, edition, verticalResults }) {
+function researchDigestEmail({ month, year, edition, verticalResults, approveUrl }) {
   const verticalSections = verticalResults.map(({ vertical, findings }) => {
     const topFindings = findings
       .sort((a, b) => b.relevance - a.relevance)
@@ -53,11 +53,18 @@ function researchDigestEmail({ month, year, edition, verticalResults }) {
 
         ${verticalSections}
 
+        ${approveUrl ? `
+        <div style="text-align: center; margin-top: 24px; margin-bottom: 16px;">
+          <a href="${approveUrl}" style="background: ${BRAND.colors.accent}; color: white; padding: 14px 28px; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 16px; display: inline-block;">
+            Approve Defaults &amp; Generate Drafts
+          </a>
+        </div>` : ''}
+
         <div style="background: #f8f9fa; padding: 16px; border-radius: 4px; margin-top: 20px;">
           <p style="margin: 0; font-size: 14px; color: #333;">
-            <strong>How to respond:</strong> Reply to this email with your picks per vertical.
+            <strong>Want custom picks?</strong> Reply with your selections per vertical.
             Format: <code>law: 1,3 | architecture: 2,4 | education: 1,2</code>
-            <br>Or just reply "approve" to use the top-ranked defaults.
+            <br>Or click the button above to use top-ranked defaults.
           </p>
         </div>
       </div>
@@ -69,11 +76,12 @@ function researchDigestEmail({ month, year, edition, verticalResults }) {
  * Draft review email - sent after content generation completes.
  * Contains the full newsletter draft ready to paste into Beehiiv.
  */
-function draftReviewEmail({ vertical, edition, month, year, draft }) {
+function draftReviewEmail({ vertical, edition, month, year, draft, blogPost, linkValidation, webflowResult, beehiivResult }) {
   const newsletterPreview = `
     <div style="background: #f8f9fa; padding: 20px; border-radius: 4px; border-left: 4px solid ${BRAND.colors.accent};">
+      <p style="color: #666; font-size: 12px; margin-bottom: 4px;">SUBJECT LINE FOR BEEHIIV:</p>
       <h2 style="color: ${BRAND.colors.primary}; font-size: 18px; margin-top: 0;">
-        Subject: ${draft.subject_line}
+        ${draft.subject_line}
       </h2>
 
       <h3 style="color: ${BRAND.colors.accent}; font-size: 15px;">THE ANCHOR: ${draft.anchor.title}</h3>
@@ -83,12 +91,15 @@ function draftReviewEmail({ vertical, edition, month, year, draft }) {
       </div>
 
       <h3 style="color: ${BRAND.colors.accent}; font-size: 15px;">THE RADAR</h3>
-      ${draft.radar.map(r => `
+      ${draft.radar.map(r => {
+        const broken = linkValidation?.broken?.find(b => b.url === r.source_url);
+        const flag = broken ? ' <span style="color: #dc3545; font-weight: bold;">[UNVERIFIED LINK]</span>' : '';
+        return `
         <p style="font-size: 14px; color: #333;">
           <strong>${r.headline}</strong> ${r.body}
-          ${r.source_url ? `<br><a href="${r.source_url}" style="color: ${BRAND.colors.accent}; font-size: 12px;">Source</a>` : ''}
-        </p>
-      `).join('')}
+          ${r.source_url ? `<br><a href="${r.source_url}" style="color: ${BRAND.colors.accent}; font-size: 12px;">Source</a>${flag}` : ''}
+        </p>`;
+      }).join('')}
 
       <h3 style="color: ${BRAND.colors.accent}; font-size: 15px;">THE QUICK WIN</h3>
       <p style="font-size: 14px; color: #333;">
@@ -117,18 +128,49 @@ function draftReviewEmail({ vertical, edition, month, year, draft }) {
           Draft Ready: ${vertical.name}
         </h1>
         <p style="color: #666; font-size: 14px; margin-top: 0;">
-          Edition ${edition}, ${month} ${year}. Review below, then paste into Beehiiv.
-          Reply with edits or "approve" to mark as ready.
+          Edition ${edition}, ${month} ${year}. Review below and reply with edits or "approve" to mark as ready.
         </p>
+        ${beehiivResult ? `
+        <div style="background: #d4edda; padding: 12px; border-radius: 4px; margin-bottom: 16px;">
+          <p style="margin: 0; font-size: 13px; color: #155724;">
+            <strong>Beehiiv draft created.</strong> <a href="https://app.beehiiv.com/posts/${beehiivResult.postId}">Review in Beehiiv editor</a>
+          </p>
+        </div>` : ''}
+        ${webflowResult ? `
+        <div style="background: #d4edda; padding: 12px; border-radius: 4px; margin-bottom: 16px;">
+          <p style="margin: 0; font-size: 13px; color: #155724;">
+            <strong>Blog draft created in Webflow.</strong> URL after publish: <a href="${webflowResult.blogUrl}">${webflowResult.blogUrl}</a>
+          </p>
+        </div>` : ''}
 
         ${newsletterPreview}
 
+        ${linkValidation?.broken?.length > 0 ? `
+        <div style="background: #f8d7da; padding: 12px; border-radius: 4px; margin-top: 16px;">
+          <p style="margin: 0; font-size: 13px; color: #721c24;">
+            <strong>Link Validation:</strong> ${linkValidation.broken.length} link(s) could not be verified:
+            ${linkValidation.broken.map(b => `<br>• ${b.location}: <a href="${b.url}">${b.url}</a> (${b.status || 'unreachable'})`).join('')}
+          </p>
+        </div>` : `
+        <div style="background: #d4edda; padding: 12px; border-radius: 4px; margin-top: 16px;">
+          <p style="margin: 0; font-size: 13px; color: #155724;">
+            <strong>Link Validation:</strong> All ${linkValidation?.results?.length || 0} source links verified.
+          </p>
+        </div>`}
+
+        ${blogPost ? `
+        <div style="margin-top: 24px; border-top: 2px solid ${BRAND.colors.accent}; padding-top: 16px;">
+          <h2 style="color: ${BRAND.colors.primary}; font-size: 18px;">Blog Expansion</h2>
+          <p style="color: #666; font-size: 12px;">SEO Title: ${blogPost.seo_title || 'N/A'} | Slug: ${blogPost.slug || 'N/A'}</p>
+          <div style="font-size: 14px; color: #333; line-height: 1.6;">
+            ${blogPost.html_body || '<p>Blog content available in Airtable record.</p>'}
+          </div>
+        </div>` : `
         <div style="background: #fff3cd; padding: 12px; border-radius: 4px; margin-top: 16px;">
           <p style="margin: 0; font-size: 13px; color: #856404;">
-            <strong>Blog expansion</strong> is also ready and attached to the Airtable record.
-            Paste it into Webflow CMS after publishing the newsletter.
+            <strong>Blog expansion</strong> is available in the Airtable record.
           </p>
-        </div>
+        </div>`}
       </div>
     `
   };

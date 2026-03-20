@@ -188,11 +188,16 @@ async function runResearchPipeline(env) {
     }
   }
 
-  // Step 6: Send digest email to Biel
+  // Step 6: Generate approve URL and send digest email to Biel
   try {
+    const approveMessage = 'approve:defaults';
+    const approveToken = await generateHmac(approveMessage, env.ANTHROPIC_API_KEY);
+    const approveUrl = `https://newsletter-content-generator.law-firm-ai-scorer.workers.dev/approve?selections=defaults&token=${approveToken}`;
+
     const emailData = researchDigestEmail({
       month, year, edition,
-      verticalResults: verticalResults.filter(v => v.findings.length > 0)
+      verticalResults: verticalResults.filter(v => v.findings.length > 0),
+      approveUrl
     });
     await sendEmail(emailData, env.RESEND_API_KEY);
     console.log('Research digest email sent');
@@ -209,6 +214,17 @@ async function runResearchPipeline(env) {
       error: v.error || null
     }))
   };
+}
+
+// ─── HMAC UTILS ───
+
+async function generateHmac(message, secret) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message));
+  return [...new Uint8Array(signature)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ─── WORKER EXPORT ───

@@ -22,10 +22,122 @@
  *   NEWSLETTER_BUCKET (R2 bucket)
  */
 
-import { getActiveVerticals, getVertical, AIRTABLE } from '../../shared/config';
+import { getActiveVerticals, getVertical, AIRTABLE, WEBFLOW, BRAND } from '../../shared/config';
 import { createRecord, queryRecords, updateRecord } from '../../shared/airtable';
 import { draftReviewEmail, sendEmail } from '../../shared/email-templates';
 import { buildDraftingPrompt, buildBlogExpansionPrompt } from './prompts';
+
+// ─── WEBFLOW CMS ───
+
+async function createWebflowBlogDraft(blogPost, vertical, env) {
+  const wordCount = blogPost.word_count || 800;
+  const readingTime = `${Math.ceil(wordCount / 250)} min read`;
+
+  const res = await fetch(`${WEBFLOW.apiBase}/collections/${WEBFLOW.blogCollectionId}/items`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.WEBFLOW_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      isArchived: false,
+      isDraft: true,
+      fieldData: {
+        name: blogPost.seo_title,
+        slug: blogPost.slug,
+        'blog---body-content': blogPost.html_body,
+        'blog---short-description': blogPost.meta_description || '',
+        'blog---category': vertical.blogCategory,
+        'blog-post---author': `${BRAND.founder}, ${BRAND.founderTitle}`,
+        'blog---reading-time': readingTime
+      }
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`Webflow CMS create failed (${res.status}): ${err}`);
+    return null;
+  }
+
+  const item = await res.json();
+  const blogUrl = `${WEBFLOW.blogBaseUrl}/${blogPost.slug}`;
+  return { itemId: item.id, blogUrl, slug: blogPost.slug };
+}
+
+// ─── BEEHIIV API ───
+
+async function createBeehiivDraft(draft, vertical, env) {
+  const pubId = vertical.beehiivPubId;
+  if (!pubId) {
+    console.log(`  No Beehiiv publication ID for ${vertical.slug}, skipping`);
+    return null;
+  }
+
+  const htmlContent = buildBeehiivHtml(draft, vertical);
+
+  const res = await fetch(`https://api.beehiiv.com/v2/publications/${pubId}/posts`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.BEEHIIV_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      title: draft.subject_line,
+      subtitle: draft.preview_text || '',
+      status: 'draft',
+      content_html: htmlContent
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`Beehiiv draft create failed (${res.status}): ${err}`);
+    return null;
+  }
+
+  const post = await res.json();
+  const postData = post.data || post;
+  return {
+    postId: postData.id,
+    webUrl: postData.web_url || null,
+    previewUrl: postData.thumbnail_url || null
+  };
+}
+
+function buildBeehiivHtml(draft, vertical) {
+  const radarHtml = (draft.radar || []).map(r =>
+    `<p><strong>${r.headline}</strong> ${r.body}${r.source_url ? ` <a href="${r.source_url}">Source</a>` : ''}</p>`
+  ).join('');
+
+  const assessmentBlock = draft.close.assessment_cta && draft.close.assessment_url
+    ? `<p style="text-align:center;"><a href="${draft.close.assessment_url}" style="background:#e27308;color:white;padding:12px 24px;text-decoration:none;border-radius:4px;font-weight:bold;">${draft.close.assessment_cta}</a></p>`
+    : '';
+
+  const contactBlock = draft.close.contact_cta && draft.close.contact_url
+    ? `<p style="text-align:center;"><a href="${draft.close.contact_url}">${draft.close.contact_cta}</a></p>`
+    : '';
+
+  return `
+    <h2>${draft.anchor.title}</h2>
+    ${draft.anchor.full.split('\n').map(p => p.trim() ? `<p>${p}</p>` : '').join('')}
+    ${draft.anchor.blog_cta && draft.anchor.blog_url ? `<p><a href="${draft.anchor.blog_url}">${draft.anchor.blog_cta}</a></p>` : ''}
+
+    <hr>
+    <h2>The Radar</h2>
+    ${radarHtml}
+
+    <hr>
+    <h2>The Quick Win: ${draft.quick_win.tool_name}</h2>
+    <p>${draft.quick_win.body}</p>
+
+    <hr>
+    <p>${draft.close.personal_note}</p>
+    <p><em>${draft.close.reply_prompt}</em></p>
+    ${assessmentBlock}
+    ${contactBlock}
+  `;
+}
 
 // ─── CLAUDE API ───
 
@@ -57,6 +169,47 @@ async function callClaude(prompt, apiKey, model = 'claude-sonnet-4-20250514') {
   if (!jsonMatch) throw new Error(`Claude returned non-JSON: ${text.slice(0, 300)}`);
 
   return JSON.parse(jsonMatch[0]);
+}
+
+// ─── EM DASH CLEANUP ───
+
+function removeEmDashes(obj) {
+  const json = JSON.stringify(obj);
+  // Replace em dashes (—) and en dashes (–) with comma-space
+  const cleaned = json.replace(/\u2014/g, ', ').replace(/\u2013/g, ', ');
+  return JSON.parse(cleaned);
+}
+
+// ─── URL VALIDATION ───
+
+async function extractAndValidateUrls(draft) {
+  const urls = [];
+
+  // Collect URLs from radar items
+  if (draft.radar) {
+    for (const item of draft.radar) {
+      if (item.source_url) urls.push({ location: `Radar: ${item.headline}`, url: item.source_url });
+    }
+  }
+
+  // Collect anchor source URL if present
+  if (draft.anchor?.source_url) {
+    urls.push({ location: 'Anchor', url: draft.anchor.source_url });
+  }
+
+  const results = [];
+  for (const { location, url } of urls) {
+    try {
+      const res = await fetch(url, { method: 'HEAD', redirect: 'follow' });
+      results.push({ location, url, status: res.status, valid: res.status < 400 });
+    } catch (err) {
+      results.push({ location, url, status: 0, valid: false, error: err.message });
+    }
+  }
+
+  const allValid = results.every(r => r.valid);
+  const broken = results.filter(r => !r.valid);
+  return { allValid, results, broken };
 }
 
 // ─── TOPIC SELECTION ───
@@ -165,13 +318,52 @@ async function generateForVertical(vertical, env, options = {}) {
   const draftPrompt = buildDraftingPrompt(
     vertical, topics, edition, month, year, previousEdition
   );
-  const draft = await callClaude(draftPrompt, env.ANTHROPIC_API_KEY);
+  let draft = await callClaude(draftPrompt, env.ANTHROPIC_API_KEY);
+  draft = removeEmDashes(draft);
   console.log(`  Newsletter draft generated: "${draft.subject_line}"`);
+
+  // Step 4b: Validate source URLs
+  const linkValidation = await extractAndValidateUrls(draft);
+  if (linkValidation.broken.length > 0) {
+    console.log(`  WARNING: ${linkValidation.broken.length} broken link(s):`);
+    linkValidation.broken.forEach(b => console.log(`    [${b.status}] ${b.location}: ${b.url}`));
+  } else {
+    console.log(`  All ${linkValidation.results.length} source links validated`);
+  }
 
   // Step 5: Generate blog expansion
   const blogPrompt = buildBlogExpansionPrompt(vertical, draft.anchor, month, year);
-  const blogPost = await callClaude(blogPrompt, env.ANTHROPIC_API_KEY);
+  let blogPost = await callClaude(blogPrompt, env.ANTHROPIC_API_KEY);
+  blogPost = removeEmDashes(blogPost);
   console.log(`  Blog expansion generated: "${blogPost.seo_title}" (${blogPost.word_count} words)`);
+
+  // Step 5b: Create Webflow blog draft
+  let webflowResult = null;
+  if (env.WEBFLOW_API_KEY) {
+    try {
+      webflowResult = await createWebflowBlogDraft(blogPost, vertical, env);
+      if (webflowResult) {
+        console.log(`  Webflow blog draft created: ${webflowResult.blogUrl}`);
+        // Inject the blog URL into the newsletter draft
+        draft.anchor.blog_url = webflowResult.blogUrl;
+      }
+    } catch (err) {
+      console.error(`  Webflow blog creation failed: ${err.message}`);
+    }
+  }
+
+  // Step 5c: Create Beehiiv newsletter draft
+  let beehiivResult = null;
+  if (env.BEEHIIV_API_KEY) {
+    try {
+      beehiivResult = await createBeehiivDraft(draft, vertical, env);
+      if (beehiivResult) {
+        console.log(`  Beehiiv draft created: ${beehiivResult.postId}`);
+      }
+    } catch (err) {
+      console.error(`  Beehiiv draft creation failed: ${err.message}`);
+    }
+  }
 
   // Step 6: Store in Airtable
   const draftRecord = await createRecord(
@@ -212,7 +404,8 @@ async function generateForVertical(vertical, env, options = {}) {
 
   // Step 8: Email Biel the draft
   const emailData = draftReviewEmail({
-    vertical, edition, month, year, draft
+    vertical, edition, month, year, draft, blogPost, linkValidation,
+    webflowResult, beehiivResult
   });
   await sendEmail(emailData, env.RESEND_API_KEY);
 
@@ -221,8 +414,26 @@ async function generateForVertical(vertical, env, options = {}) {
     edition,
     subject_line: draft.subject_line,
     blog_title: blogPost.seo_title,
+    blog_url: webflowResult?.blogUrl || null,
+    beehiiv_draft: beehiivResult?.postId || null,
     airtableRecordId: draftRecord.id
   };
+}
+
+// ─── HMAC UTILS ───
+
+async function generateHmac(message, secret) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message));
+  return [...new Uint8Array(signature)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function verifyHmac(message, token, secret) {
+  const expected = await generateHmac(message, secret);
+  return token === expected;
 }
 
 // ─── WORKER EXPORT ───
@@ -230,6 +441,64 @@ async function generateForVertical(vertical, env, options = {}) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // Approve via link (GET with HMAC token)
+    if (url.pathname === '/approve') {
+      const token = url.searchParams.get('token');
+      const selections = url.searchParams.get('selections') || 'defaults';
+
+      if (!token) {
+        return new Response('Missing token', { status: 401 });
+      }
+
+      const message = `approve:${selections}`;
+      const valid = await verifyHmac(message, token, env.ANTHROPIC_API_KEY);
+      if (!valid) {
+        return new Response('Invalid token', { status: 403 });
+      }
+
+      // Parse selections or use defaults
+      const opts = {};
+      if (selections !== 'defaults') {
+        try {
+          // Format: law:0,1,2|architecture:1,2,0|education:0,2,3
+          const parsed = {};
+          selections.split('|').forEach(part => {
+            const [slug, indices] = part.split(':');
+            parsed[slug.trim()] = indices.split(',').map(i => parseInt(i.trim()));
+          });
+          opts.selections = parsed;
+        } catch (e) {
+          // Fall through to defaults
+        }
+      }
+
+      // Run generation in background
+      const verticals = getActiveVerticals();
+      const resultPromise = (async () => {
+        const results = [];
+        for (const vertical of verticals) {
+          try {
+            const result = await generateForVertical(vertical, env, {
+              selections: opts.selections?.[vertical.slug] || null
+            });
+            results.push(result);
+          } catch (err) {
+            results.push({ vertical: vertical.name, error: err.message });
+          }
+        }
+        return results;
+      })();
+      ctx.waitUntil(resultPromise);
+
+      return new Response(`
+        <html><body style="font-family: Arial, sans-serif; max-width: 640px; margin: 40px auto; text-align: center;">
+          <h1 style="color: #1a1a2e;">Content Generation Started</h1>
+          <p>Drafts are being generated for all active verticals. You will receive review emails shortly.</p>
+          <p style="color: #666;">You can close this tab.</p>
+        </body></html>
+      `, { headers: { 'Content-Type': 'text/html' } });
+    }
 
     // Health check
     if (url.pathname === '/health') {

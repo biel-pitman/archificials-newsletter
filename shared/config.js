@@ -11,6 +11,7 @@ const VERTICALS = {
     name: 'Your Legal AI Brief',
     slug: 'law',
     active: true,
+    beehiivPubId: null, // TODO: Replace with actual Beehiiv publication ID
     assessmentUrl: 'https://www.archificials.com/assessment/law',
     blogCategory: 'legal-ai',
     blogBaseUrl: 'https://www.archificials.com/thoughts',
@@ -61,7 +62,7 @@ const VERTICALS = {
       assessment: 'Take the free 5-minute AI Readiness Assessment for Law Firms',
       assessmentFrame: 'See how your firm compares across four dimensions of AI readiness.',
       blog: 'Read the full analysis on our blog',
-      contact: 'Book a 15-minute call with Biel',
+      contact: 'Book a 15-minute consultation',
       contactUrl: 'https://calendly.com/archificials/consultation'
     }
   },
@@ -70,6 +71,7 @@ const VERTICALS = {
     name: 'Your AI Blueprint',
     slug: 'architecture',
     active: true,
+    beehiivPubId: null, // TODO: Replace with actual Beehiiv publication ID
     assessmentUrl: 'https://www.archificials.com/assessment/architecture',
     blogCategory: 'architecture-ai',
     blogBaseUrl: 'https://www.archificials.com/thoughts',
@@ -120,7 +122,7 @@ const VERTICALS = {
       assessment: 'Take the free AI Readiness Assessment for Architecture Firms',
       assessmentFrame: '5 minutes to understand where AI fits in your practice.',
       blog: 'Read the full analysis on our blog',
-      contact: 'Book a 15-minute call with Biel',
+      contact: 'Book a 15-minute consultation',
       contactUrl: 'https://calendly.com/archificials/consultation'
     }
   },
@@ -129,6 +131,7 @@ const VERTICALS = {
     name: 'Your AI Lecture',
     slug: 'education',
     active: true,
+    beehiivPubId: null, // TODO: Replace with actual Beehiiv publication ID
     assessmentUrl: 'https://www.archificials.com/assessment/education',
     blogCategory: 'education-ai',
     blogBaseUrl: 'https://www.archificials.com/thoughts',
@@ -311,6 +314,16 @@ const AIRTABLE = {
   }
 };
 
+/**
+ * Webflow CMS configuration.
+ */
+const WEBFLOW = {
+  siteId: '68ffce003dacbbe1d2439718',
+  blogCollectionId: '68ffce013dacbbe1d24397e4',
+  blogBaseUrl: 'https://www.archificials.com/thoughts',
+  apiBase: 'https://api.webflow.com/v2'
+};
+
 function getActiveVerticals() {
   return Object.values(VERTICALS).filter(v => v.active);
 }
@@ -324,6 +337,7 @@ module.exports = {
   BRAND,
   NEWSLETTER,
   AIRTABLE,
+  WEBFLOW,
   getActiveVerticals,
   getVertical
 };
