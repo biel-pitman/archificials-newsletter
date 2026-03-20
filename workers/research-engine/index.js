@@ -158,7 +158,7 @@ async function runResearchPipeline(env) {
           findings_json: JSON.stringify(findings),
           findings_count: findings.length,
           status: 'generated',
-          created: now.toISOString()
+          created: now.toISOString().split('T')[0]
         },
         env.AIRTABLE_API_KEY
       );

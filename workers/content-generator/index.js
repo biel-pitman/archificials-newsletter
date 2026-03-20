@@ -185,7 +185,7 @@ async function generateForVertical(vertical, env, options = {}) {
       blog_json: JSON.stringify(blogPost),
       research_record_id: research.id,
       status: 'drafted',
-      created: now.toISOString()
+      created: now.toISOString().split('T')[0]
     },
     env.AIRTABLE_API_KEY
   );
