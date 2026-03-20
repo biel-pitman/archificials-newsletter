@@ -1,0 +1,22 @@
+{
+  "name": "archificials-newsletter",
+  "version": "1.0.0",
+  "description": "Archificials automated newsletter pipeline: research, draft, and publish across 4 verticals",
+  "private": true,
+  "scripts": {
+    "dev:research": "cd workers/research-engine && npx wrangler dev",
+    "dev:content": "cd workers/content-generator && npx wrangler dev",
+    "dev:metrics": "cd workers/metrics-collector && npx wrangler dev",
+    "deploy:research": "cd workers/research-engine && npx wrangler deploy",
+    "deploy:content": "cd workers/content-generator && npx wrangler deploy",
+    "deploy:metrics": "cd workers/metrics-collector && npx wrangler deploy",
+    "deploy:all": "npm run deploy:research && npm run deploy:content && npm run deploy:metrics",
+    "test:research": "node scripts/test-research.js",
+    "test:content": "node scripts/test-content.js",
+    "trigger:research": "curl -X POST https://newsletter-research-engine.archificials.workers.dev/trigger",
+    "trigger:content": "curl -X POST https://newsletter-content-generator.archificials.workers.dev/generate"
+  },
+  "keywords": ["newsletter", "automation", "cloudflare-workers", "ai"],
+  "author": "Archificials <biel@archificials.com>",
+  "license": "UNLICENSED"
+}

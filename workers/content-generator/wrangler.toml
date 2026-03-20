@@ -1,0 +1,17 @@
+name = "newsletter-content-generator"
+main = "index.js"
+compatibility_date = "2024-12-01"
+
+# No cron - triggered via HTTP POST after research review
+
+[[r2_buckets]]
+binding = "NEWSLETTER_BUCKET"
+bucket_name = "archificials-newsletter"
+
+[vars]
+WORKER_NAME = "content-generator"
+
+# Secrets (set via `npx wrangler secret put <NAME>`):
+#   ANTHROPIC_API_KEY
+#   AIRTABLE_API_KEY
+#   RESEND_API_KEY

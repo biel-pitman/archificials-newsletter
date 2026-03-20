@@ -1,0 +1,15 @@
+name = "newsletter-metrics-collector"
+main = "index.js"
+compatibility_date = "2024-12-01"
+
+# Monthly cron: 28th of each month at 9am UTC
+[triggers]
+crons = ["0 9 28 * *"]
+
+[vars]
+WORKER_NAME = "metrics-collector"
+
+# Secrets (set via `npx wrangler secret put <NAME>`):
+#   BEEHIIV_API_KEY (optional, for automated collection)
+#   AIRTABLE_API_KEY
+#   RESEND_API_KEY
