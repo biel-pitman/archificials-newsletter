@@ -11,7 +11,7 @@ const VERTICALS = {
     name: 'Your Legal AI Brief',
     slug: 'law',
     active: true,
-    beehiivPubId: null, // TODO: Replace with actual Beehiiv publication ID
+    beehiivPubId: 'pub_73a36fdf-e162-49b4-a5d8-66f820db3f9e',
     assessmentUrl: 'https://www.archificials.com/assessment/law',
     blogCategory: 'legal-ai',
     blogBaseUrl: 'https://www.archificials.com/thoughts',
@@ -71,7 +71,7 @@ const VERTICALS = {
     name: 'Your AI Blueprint',
     slug: 'architecture',
     active: true,
-    beehiivPubId: null, // TODO: Replace with actual Beehiiv publication ID
+    beehiivPubId: 'pub_da077cb2-3a55-48cb-84f3-2113de6dcf91',
     assessmentUrl: 'https://www.archificials.com/assessment/architecture',
     blogCategory: 'architecture-ai',
     blogBaseUrl: 'https://www.archificials.com/thoughts',
@@ -131,7 +131,7 @@ const VERTICALS = {
     name: 'Your AI Lecture',
     slug: 'education',
     active: true,
-    beehiivPubId: null, // TODO: Replace with actual Beehiiv publication ID
+    beehiivPubId: 'pub_4b8dcf89-0f56-4054-926c-3eee50c250f4',
     assessmentUrl: 'https://www.archificials.com/assessment/education',
     blogCategory: 'education-ai',
     blogBaseUrl: 'https://www.archificials.com/thoughts',

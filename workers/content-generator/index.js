@@ -48,7 +48,8 @@ async function createWebflowBlogDraft(blogPost, vertical, env) {
         'blog---body-content': blogPost.html_body,
         'blog---short-description': blogPost.meta_description || '',
         'blog---category': vertical.blogCategory,
-        'blog-post---author': `${BRAND.founder}, ${BRAND.founderTitle}`,
+        'blog-post---author': BRAND.founder,
+        'blog---author-subtitle': `${BRAND.founderTitle}, ${BRAND.name}`,
         'blog---reading-time': readingTime
       }
     })
@@ -86,13 +87,18 @@ async function createBeehiivDraft(draft, vertical, env) {
       title: draft.subject_line,
       subtitle: draft.preview_text || '',
       status: 'draft',
-      content_html: htmlContent
+      content: [{ type: 'html', html: htmlContent }]
     })
   });
 
   if (!res.ok) {
-    const err = await res.text();
-    console.error(`Beehiiv draft create failed (${res.status}): ${err}`);
+    const errText = await res.text();
+    // Beehiiv Posts API requires Enterprise plan
+    if (res.status === 403) {
+      console.log(`  Beehiiv API requires Enterprise plan, skipping auto-draft for ${vertical.slug}`);
+    } else {
+      console.error(`Beehiiv draft create failed (${res.status}): ${errText}`);
+    }
     return null;
   }
 
