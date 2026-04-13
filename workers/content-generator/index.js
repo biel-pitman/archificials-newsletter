@@ -16,14 +16,17 @@
  *   GET  /health             - Health check
  *
  * Required env vars:
- *   ANTHROPIC_API_KEY, AIRTABLE_API_KEY, RESEND_API_KEY
+ *   ANTHROPIC_API_KEY, SUPABASE_SERVICE_KEY, RESEND_API_KEY
  *
  * Required bindings:
  *   NEWSLETTER_BUCKET (R2 bucket)
  */
 
-import { getActiveVerticals, getVertical, AIRTABLE, WEBFLOW, BRAND } from '../../shared/config';
-import { createRecord, queryRecords, updateRecord } from '../../shared/airtable';
+import { getActiveVerticals, getVertical, SUPABASE, WEBFLOW, BRAND } from '../../shared/config';
+import { createRecord, queryRecords, updateRecord } from '../../shared/supabase';
+
+// Use SUPABASE.tables for table name references (same keys as old AIRTABLE.tables)
+const AIRTABLE = SUPABASE;
 import { draftReviewEmail, sendEmail } from '../../shared/email-templates';
 import { buildDraftingPrompt, buildBlogExpansionPrompt } from './prompts';
 
@@ -161,74 +164,185 @@ function buildBeehiivHtml(draft, vertical) {
 
 // ─── CLAUDE API ───
 
-async function callClaude(prompt, apiKey, model = 'claude-sonnet-4-20250514') {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+async function callGemini(prompt, apiKey, jsonPattern) {
+  console.log('  Falling back to Gemini 2.5 Pro');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json'
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model,
-      max_tokens: 8192,
-      messages: [{ role: 'user', content: prompt }]
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: 8192 }
     })
   });
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Claude API failed (${res.status}): ${err}`);
+    throw new Error(`Gemini API failed (${res.status}): ${err}`);
   }
 
   const data = await res.json();
-  const text = data.content?.[0]?.text || '';
-
-  // Parse JSON from response
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error(`Claude returned non-JSON: ${text.slice(0, 300)}`);
-
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const jsonMatch = text.match(jsonPattern);
+  if (!jsonMatch) throw new Error(`Gemini returned non-JSON: ${text.slice(0, 200)}`);
   return JSON.parse(jsonMatch[0]);
 }
 
-// ─── EM DASH CLEANUP ───
+async function callLLM(prompt, env, { maxTokens = 8192, jsonPattern = /\{[\s\S]*\}/, retries = 3 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
 
-function removeEmDashes(obj) {
-  const json = JSON.stringify(obj);
-  // Replace em dashes (—) and en dashes (–) with comma-space
-  const cleaned = json.replace(/\u2014/g, ', ').replace(/\u2013/g, ', ');
-  return JSON.parse(cleaned);
+      if (res.status === 529 || res.status === 429) {
+        const wait = Math.pow(2, attempt) * 1000;
+        console.warn(`Claude API returned ${res.status}, retrying in ${wait}ms (attempt ${attempt}/${retries})`);
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        lastError = new Error(`Claude API overloaded after ${retries} attempts`);
+        break;
+      }
+
+      if (!res.ok) {
+        const err = await res.text();
+        lastError = new Error(`Claude API failed (${res.status}): ${err}`);
+        break;
+      }
+
+      const data = await res.json();
+      const text = data.content?.[0]?.text || '';
+      const jsonMatch = text.match(jsonPattern);
+      if (!jsonMatch) throw new Error(`Claude returned non-JSON: ${text.slice(0, 300)}`);
+      return JSON.parse(jsonMatch[0]);
+    } catch (err) {
+      lastError = err;
+      break;
+    }
+  }
+
+  if (env.GEMINI_API_KEY) {
+    console.warn(`Claude failed: ${lastError.message}. Trying Gemini fallback.`);
+    return callGemini(prompt, env.GEMINI_API_KEY, jsonPattern);
+  }
+
+  throw lastError;
+}
+
+// ─── POST-PROCESSING: EM DASHES + BANNED WORDS ───
+
+const BANNED_WORDS_REGEX = new RegExp(
+  '\\b(' + [
+    // Verbs
+    'delves?', 'delving', 'leverag(?:es?|ing|ed)', 'fosters?', 'fostering',
+    'unleash(?:es|ing|ed)?', 'underscores?', 'underscoring',
+    'optimiz(?:es?|ing|ed)', 'streamlin(?:es?|ing|ed)',
+    'harness(?:es|ing|ed)?', 'empowers?', 'empowering',
+    'unlocks?', 'unlocking', 'elevat(?:es?|ing|ed)',
+    'demystif(?:y|ies|ying|ied)', 'embarks?', 'embarking',
+    'navigat(?:es?|ing|ed)', 'elucidat(?:es?|ing|ed)',
+    'unravel(?:s|ing|ed)?', 'showcas(?:es?|ing|ed)',
+    'exemplif(?:y|ies|ying|ied)', 'propel(?:s|ling|led)?',
+    'supercharg(?:es?|ing|ed)',
+    // Nouns
+    'tapestry', 'tapestries', 'landscape(?:s)?', 'realm(?:s)?',
+    'beacon(?:s)?', 'cornerstone(?:s)?', 'testament',
+    'paradigm(?:s)?', 'metamorphos(?:is|es)', 'plethora',
+    'myriad', 'nuance(?:s|d)?', 'ecosystem(?:s)?',
+    'labyrinth(?:s)?', 'embodiment', 'trajectory', 'trajectories',
+    // Adjectives
+    'cutting-edge', 'seamless(?:ly)?', 'robust(?:ly)?',
+    'multifaceted', 'pivotal(?:ly)?', 'innovative(?:ly)?',
+    'transformative(?:ly)?', 'profound(?:ly)?',
+    'paramount', 'next-generation',
+    // Filler
+    'actually', 'simply', 'merely', 'essentially', 'ultimately',
+    'furthermore', 'moreover', 'additionally', 'arguably'
+  ].join('|') + ')\\b',
+  'gi'
+);
+
+function cleanAISlop(obj) {
+  let json = JSON.stringify(obj);
+
+  // Em dashes and en dashes
+  json = json.replace(/\u2014/g, ', ').replace(/\u2013/g, ', ');
+
+  // Banned words: remove them and clean up leftover grammar artifacts
+  json = json.replace(BANNED_WORDS_REGEX, '');
+
+  // Clean up double spaces, orphaned commas, leading commas after periods
+  json = json.replace(/  +/g, ' ');
+  json = json.replace(/,\s*,/g, ',');
+  json = json.replace(/\.\s*,/g, '.');
+  json = json.replace(/,\s*\./g, '.');
+  json = json.replace(/\s+([.,;:])/g, '$1');
+
+  return JSON.parse(json);
 }
 
 // ─── URL VALIDATION ───
 
-async function extractAndValidateUrls(draft) {
-  const urls = [];
+async function validateUrl(url) {
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,*/*'
+  };
 
-  // Collect URLs from radar items
+  // Try GET with browser headers (many sites block HEAD and bot User-Agents)
+  try {
+    const res = await fetch(url, { method: 'GET', headers, redirect: 'follow' });
+    return { url, status: res.status, valid: res.status < 400 };
+  } catch (err) {
+    return { url, status: 0, valid: false, error: err.message };
+  }
+}
+
+async function extractAndValidateUrls(draft) {
+  const checks = [];
+
   if (draft.radar) {
     for (const item of draft.radar) {
-      if (item.source_url) urls.push({ location: `Radar: ${item.headline}`, url: item.source_url });
+      if (item.source_url) checks.push({ location: `Radar: ${item.headline}`, url: item.source_url, type: 'radar', item });
     }
   }
-
-  // Collect anchor source URL if present
   if (draft.anchor?.source_url) {
-    urls.push({ location: 'Anchor', url: draft.anchor.source_url });
+    checks.push({ location: 'Anchor', url: draft.anchor.source_url, type: 'anchor' });
   }
 
   const results = [];
-  for (const { location, url } of urls) {
-    try {
-      const res = await fetch(url, { method: 'HEAD', redirect: 'follow' });
-      results.push({ location, url, status: res.status, valid: res.status < 400 });
-    } catch (err) {
-      results.push({ location, url, status: 0, valid: false, error: err.message });
+  for (const check of checks) {
+    const result = await validateUrl(check.url);
+    results.push({ ...check, ...result });
+  }
+
+  // Remove broken links from the draft instead of just flagging them
+  const broken = results.filter(r => !r.valid);
+  for (const b of broken) {
+    if (b.type === 'radar' && b.item) {
+      console.log(`  Removing broken radar link: ${b.url} (${b.status})`);
+      delete b.item.source_url;
+    }
+    if (b.type === 'anchor') {
+      console.log(`  Removing broken anchor link: ${b.url} (${b.status})`);
+      delete draft.anchor.source_url;
     }
   }
 
-  const allValid = results.every(r => r.valid);
-  const broken = results.filter(r => !r.valid);
+  const allValid = broken.length === 0;
   return { allValid, results, broken };
 }
 
@@ -279,8 +393,8 @@ async function getPreviousEdition(vertical, apiKey) {
     const records = await queryRecords(
       AIRTABLE.tables.drafts,
       {
-        filterByFormula: `AND({vertical} = "${vertical.slug}", {status} != "failed")`,
-        sort: [{ field: 'created', direction: 'desc' }],
+        filter: { vertical: `eq.${vertical.slug}`, status: 'neq.failed' },
+        sort: [{ field: 'created_at', direction: 'desc' }],
         maxRecords: 1
       },
       apiKey
@@ -311,11 +425,11 @@ async function generateForVertical(vertical, env, options = {}) {
   const researchRecords = await queryRecords(
     AIRTABLE.tables.research,
     {
-      filterByFormula: `AND({vertical} = "${vertical.slug}", {status} = "generated")`,
-      sort: [{ field: 'created', direction: 'desc' }],
+      filter: { vertical: `eq.${vertical.slug}`, status: 'eq.generated' },
+      sort: [{ field: 'created_at', direction: 'desc' }],
       maxRecords: 1
     },
-    env.AIRTABLE_API_KEY
+    env.SUPABASE_SERVICE_KEY
   );
 
   if (researchRecords.length === 0) {
@@ -332,14 +446,14 @@ async function generateForVertical(vertical, env, options = {}) {
   console.log(`  Quick Win: ${topics.quickWin.headline}`);
 
   // Step 3: Get previous edition for continuity
-  const previousEdition = await getPreviousEdition(vertical, env.AIRTABLE_API_KEY);
+  const previousEdition = await getPreviousEdition(vertical, env.SUPABASE_SERVICE_KEY);
 
   // Step 4: Generate newsletter draft
   const draftPrompt = buildDraftingPrompt(
     vertical, topics, edition, month, year, previousEdition
   );
-  let draft = await callClaude(draftPrompt, env.ANTHROPIC_API_KEY);
-  draft = removeEmDashes(draft);
+  let draft = await callLLM(draftPrompt, env, { maxTokens: 8192, jsonPattern: /\{[\s\S]*\}/ });
+  draft = cleanAISlop(draft);
   console.log(`  Newsletter draft generated: "${draft.subject_line}"`);
 
   // Step 4b: Validate source URLs
@@ -353,8 +467,8 @@ async function generateForVertical(vertical, env, options = {}) {
 
   // Step 5: Generate blog expansion
   const blogPrompt = buildBlogExpansionPrompt(vertical, draft.anchor, topics, month, year);
-  let blogPost = await callClaude(blogPrompt, env.ANTHROPIC_API_KEY);
-  blogPost = removeEmDashes(blogPost);
+  let blogPost = await callLLM(blogPrompt, env, { maxTokens: 8192, jsonPattern: /\{[\s\S]*\}/ });
+  blogPost = cleanAISlop(blogPost);
   console.log(`  Blog expansion generated: "${blogPost.seo_title}" (${blogPost.word_count} words)`);
 
   // Step 5b: Create Webflow blog draft
@@ -397,9 +511,9 @@ async function generateForVertical(vertical, env, options = {}) {
       blog_json: JSON.stringify(blogPost),
       research_record_id: research.id,
       status: 'drafted',
-      created: now.toISOString().split('T')[0]
+      created_at: now.toISOString()
     },
-    env.AIRTABLE_API_KEY
+    env.SUPABASE_SERVICE_KEY
   );
 
   // Mark research as consumed
@@ -407,7 +521,7 @@ async function generateForVertical(vertical, env, options = {}) {
     AIRTABLE.tables.research,
     research.id,
     { status: 'consumed' },
-    env.AIRTABLE_API_KEY
+    env.SUPABASE_SERVICE_KEY
   );
 
   // Step 7: Store in R2

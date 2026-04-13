@@ -9,21 +9,28 @@ const { BRAND } = require('./config');
  * Research digest email - sent after research phase completes.
  * Contains top findings per vertical for Biel to review and select topics.
  */
-function researchDigestEmail({ month, year, edition, verticalResults, approveUrl }) {
+function researchDigestEmail({ month, year, edition, verticalResults, approveUrl, selectionLinks = {} }) {
   const verticalSections = verticalResults.map(({ vertical, findings }) => {
     const topFindings = findings
+      .map((f, originalIndex) => ({ ...f, originalIndex }))
       .sort((a, b) => b.relevance - a.relevance)
-      .slice(0, 4);
+      .slice(0, 6);
 
-    const findingsHtml = topFindings.map((f, i) => `
+    const findingsHtml = topFindings.map((f, i) => {
+      const pickLink = selectionLinks[vertical.slug]?.find(s => s.index === f.originalIndex);
+      const pickButton = pickLink
+        ? ` <a href="${pickLink.url}" style="color: ${BRAND.colors.accent}; font-size: 11px; font-weight: bold; text-decoration: none; border: 1px solid ${BRAND.colors.accent}; padding: 2px 8px; border-radius: 3px; margin-left: 4px;">Use as Anchor</a>`
+        : '';
+
+      return `
       <tr>
         <td style="padding: 8px 12px; border-bottom: 1px solid #eee; color: #333; font-size: 14px;">
-          <strong>${i + 1}. ${f.headline}</strong> (Relevance: ${f.relevance}/5)<br>
+          <strong>${i + 1}. ${f.headline}</strong> (Relevance: ${f.relevance}/5)${pickButton}<br>
           <span style="color: #666;">${f.summary}</span><br>
           <a href="${f.sourceUrl}" style="color: ${BRAND.colors.accent}; font-size: 12px;">${f.source}</a>
         </td>
       </tr>
-    `).join('');
+    `}).join('');
 
     return `
       <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 24px;">
@@ -47,8 +54,8 @@ function researchDigestEmail({ month, year, edition, verticalResults, approveUrl
           Research Complete: ${month} ${year}, Edition ${edition}
         </h1>
         <p style="color: #666; font-size: 14px; margin-top: 0;">
-          Top findings per vertical are below. Reply with your topic selections,
-          or defaults (highest relevance) will be used in 24 hours.
+          Top findings per vertical are below. Click "Use as Anchor" on any topic to generate a draft around it,
+          or approve defaults to use the top-ranked topics automatically.
         </p>
 
         ${verticalSections}
@@ -62,9 +69,9 @@ function researchDigestEmail({ month, year, edition, verticalResults, approveUrl
 
         <div style="background: #f8f9fa; padding: 16px; border-radius: 4px; margin-top: 20px;">
           <p style="margin: 0; font-size: 14px; color: #333;">
-            <strong>Want custom picks?</strong> Reply with your selections per vertical.
-            Format: <code>law: 1,3 | architecture: 2,4 | education: 1,2</code>
-            <br>Or click the button above to use top-ranked defaults.
+            <strong>Custom combo via PowerShell:</strong><br>
+            <code style="font-size: 12px;">Invoke-WebRequest -Method POST -Uri "https://newsletter-content-generator.law-firm-ai-scorer.workers.dev/generate" -ContentType "application/json" -Body '{"selections":{"law":[0,2],"architecture":[1,3],"education":[0,2]}}' -UseBasicParsing</code>
+            <br><span style="color: #666; font-size: 12px;">Replace the index numbers with your picks (0-based, matching the order above).</span>
           </p>
         </div>
       </div>
@@ -77,6 +84,9 @@ function researchDigestEmail({ month, year, edition, verticalResults, approveUrl
  * Contains the full newsletter draft ready to paste into Beehiiv.
  */
 function draftReviewEmail({ vertical, edition, month, year, draft, blogPost, linkValidation, webflowResult, beehiivResult }) {
+  // Determine blog URL: prefer Webflow result, fall back to draft value
+  const blogUrl = webflowResult?.blogUrl || draft.anchor?.blog_url || null;
+
   const newsletterPreview = `
     <div style="background: #f8f9fa; padding: 20px; border-radius: 4px; border-left: 4px solid ${BRAND.colors.accent};">
       <p style="color: #666; font-size: 12px; margin-bottom: 4px;">SUBJECT LINE FOR BEEHIIV:</p>
@@ -87,7 +97,10 @@ function draftReviewEmail({ vertical, edition, month, year, draft, blogPost, lin
       <h3 style="color: ${BRAND.colors.accent}; font-size: 15px;">THE ANCHOR: ${draft.anchor.title}</h3>
       <div style="font-size: 14px; color: #333; line-height: 1.6;">
         ${draft.anchor.teaser.split('\n').map(p => `<p>${p}</p>`).join('')}
-        <p><em>${draft.anchor.blog_cta}</em></p>
+        ${blogUrl
+          ? `<p><a href="${blogUrl}" style="color: ${BRAND.colors.accent};">${draft.anchor.blog_cta || 'Read the full analysis on our blog'}</a></p>`
+          : `<p><em>${draft.anchor.blog_cta || 'Read the full analysis on our blog'}</em></p>`
+        }
       </div>
 
       <h3 style="color: ${BRAND.colors.accent}; font-size: 15px;">THE RADAR</h3>

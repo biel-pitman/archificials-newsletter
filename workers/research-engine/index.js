@@ -3,27 +3,75 @@
  *
  * Cloudflare Worker that runs on a cron schedule (1st and 10th of each month).
  * For each active vertical:
- *   1. Runs 5 Brave Search queries
- *   2. Sends results to Claude API for structured analysis
- *   3. Stores findings in Airtable
+ *   1. Calls Gemini with Google Search grounding for deep, cited research
+ *   2. Structures the grounded findings via Claude (or Gemini without grounding)
+ *   3. Stores findings in Supabase
  *   4. Stores raw JSON in R2
  *   5. Emails Biel a research digest via Resend
+ *
+ * Fallback: If Gemini grounding fails, falls back to Brave Search + LLM analysis.
  *
  * Also exposes POST /trigger for manual runs.
  *
  * Required env vars:
- *   ANTHROPIC_API_KEY, BRAVE_API_KEY, AIRTABLE_API_KEY, RESEND_API_KEY
+ *   ANTHROPIC_API_KEY, GEMINI_API_KEY, SUPABASE_SERVICE_KEY, RESEND_API_KEY
+ *
+ * Optional env vars:
+ *   BRAVE_API_KEY (fallback only)
  *
  * Required bindings:
  *   NEWSLETTER_BUCKET (R2 bucket)
  */
 
-import { getActiveVerticals, AIRTABLE } from '../../shared/config';
-import { createRecord, queryRecords } from '../../shared/airtable';
-import { researchDigestEmail, sendEmail } from '../../shared/email-templates';
-import { buildResearchPrompt, buildSearchQueries } from './prompts';
+import { getActiveVerticals, BRAND, SUPABASE } from '../../shared/config';
+import { createRecord, queryRecords } from '../../shared/supabase';
 
-// ─── BRAVE SEARCH ───
+// Use SUPABASE.tables for table name references (same keys as old AIRTABLE.tables)
+const AIRTABLE = SUPABASE;
+import { researchDigestEmail, sendEmail } from '../../shared/email-templates';
+import { buildResearchPrompt, buildSearchQueries, buildGroundingPrompt, buildStructuringPrompt } from './prompts';
+
+// ─── GEMINI WITH GOOGLE SEARCH GROUNDING ───
+
+/**
+ * Call Gemini with Google Search grounding enabled.
+ * The model searches the web itself and returns text with citation metadata.
+ *
+ * Returns: { text, groundingChunks, groundingSupports, searchQueries }
+ */
+async function callGeminiGrounded(prompt, apiKey) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      tools: [{ google_search: {} }],
+      generationConfig: { maxOutputTokens: 8192 }
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gemini grounding failed (${res.status}): ${err}`);
+  }
+
+  const data = await res.json();
+  const candidate = data.candidates?.[0];
+  if (!candidate) throw new Error('Gemini returned no candidates');
+
+  const text = candidate.content?.parts?.[0]?.text || '';
+  const meta = candidate.groundingMetadata || {};
+
+  return {
+    text,
+    groundingChunks: meta.groundingChunks || [],
+    groundingSupports: meta.groundingSupports || [],
+    searchQueries: meta.webSearchQueries || []
+  };
+}
+
+// ─── BRAVE SEARCH (FALLBACK) ───
 
 async function braveSearch(query, apiKey, count = 10) {
   const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
@@ -45,36 +93,134 @@ async function braveSearch(query, apiKey, count = 10) {
   }));
 }
 
-// ─── CLAUDE API ───
+// ─── LLM CALLS (for structuring step) ───
 
-async function callClaude(prompt, apiKey, model = 'claude-sonnet-4-20250514') {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+async function callClaude(prompt, env, { maxTokens = 4096, jsonPattern = /\[[\s\S]*\]/, retries = 3 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+
+      if (res.status === 529 || res.status === 429) {
+        const wait = Math.pow(2, attempt) * 1000;
+        console.warn(`Claude API returned ${res.status}, retrying in ${wait}ms (attempt ${attempt}/${retries})`);
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        lastError = new Error(`Claude API overloaded after ${retries} attempts`);
+        break;
+      }
+
+      if (!res.ok) {
+        const err = await res.text();
+        lastError = new Error(`Claude API failed (${res.status}): ${err}`);
+        break;
+      }
+
+      const data = await res.json();
+      const text = data.content?.[0]?.text || '';
+      const jsonMatch = text.match(jsonPattern);
+      if (!jsonMatch) throw new Error(`Claude returned non-JSON: ${text.slice(0, 300)}`);
+      return JSON.parse(jsonMatch[0]);
+    } catch (err) {
+      lastError = err;
+      break;
+    }
+  }
+  throw lastError;
+}
+
+async function callGeminiPlain(prompt, apiKey, jsonPattern = /\[[\s\S]*\]/) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json'
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      messages: [{ role: 'user', content: prompt }]
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: 8192 }
     })
   });
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Claude API failed (${res.status}): ${err}`);
+    throw new Error(`Gemini API failed (${res.status}): ${err}`);
   }
 
   const data = await res.json();
-  const text = data.content?.[0]?.text || '';
-
-  // Parse JSON from response (handle markdown code blocks if present)
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) throw new Error(`Claude returned non-JSON: ${text.slice(0, 200)}`);
-
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const jsonMatch = text.match(jsonPattern);
+  if (!jsonMatch) throw new Error(`Gemini returned non-JSON: ${text.slice(0, 300)}`);
   return JSON.parse(jsonMatch[0]);
+}
+
+/**
+ * Structure grounded text into JSON findings.
+ * Tries Claude first, falls back to Gemini (without grounding).
+ */
+async function structureFindings(prompt, env) {
+  try {
+    return await callClaude(prompt, env, { maxTokens: 4096, jsonPattern: /\[[\s\S]*\]/ });
+  } catch (claudeErr) {
+    console.warn(`Claude structuring failed: ${claudeErr.message}. Trying Gemini.`);
+    if (env.GEMINI_API_KEY) {
+      return await callGeminiPlain(prompt, env.GEMINI_API_KEY, /\[[\s\S]*\]/);
+    }
+    throw claudeErr;
+  }
+}
+
+// ─── POST-PROCESSING: BANNED WORDS ───
+
+const BANNED_WORDS_REGEX = new RegExp(
+  '\\b(' + [
+    'delves?', 'delving', 'leverag(?:es?|ing|ed)', 'fosters?', 'fostering',
+    'unleash(?:es|ing|ed)?', 'underscores?', 'underscoring',
+    'optimiz(?:es?|ing|ed)', 'streamlin(?:es?|ing|ed)',
+    'harness(?:es|ing|ed)?', 'empowers?', 'empowering',
+    'unlocks?', 'unlocking', 'elevat(?:es?|ing|ed)',
+    'demystif(?:y|ies|ying|ied)', 'embarks?', 'embarking',
+    'navigat(?:es?|ing|ed)', 'elucidat(?:es?|ing|ed)',
+    'unravel(?:s|ing|ed)?', 'showcas(?:es?|ing|ed)',
+    'exemplif(?:y|ies|ying|ied)', 'propel(?:s|ling|led)?',
+    'supercharg(?:es?|ing|ed)',
+    'tapestry', 'tapestries', 'landscape(?:s)?', 'realm(?:s)?',
+    'beacon(?:s)?', 'cornerstone(?:s)?', 'testament',
+    'paradigm(?:s)?', 'metamorphos(?:is|es)', 'plethora',
+    'myriad', 'nuance(?:s|d)?', 'ecosystem(?:s)?',
+    'labyrinth(?:s)?', 'embodiment', 'trajectory', 'trajectories',
+    'cutting-edge', 'seamless(?:ly)?', 'robust(?:ly)?',
+    'multifaceted', 'pivotal(?:ly)?', 'innovative(?:ly)?',
+    'transformative(?:ly)?', 'profound(?:ly)?',
+    'paramount', 'next-generation',
+    'actually', 'simply', 'merely', 'essentially', 'ultimately',
+    'furthermore', 'moreover', 'additionally', 'arguably'
+  ].join('|') + ')\\b',
+  'gi'
+);
+
+function cleanAISlop(obj) {
+  let json = JSON.stringify(obj);
+  json = json.replace(/\u2014/g, ', ').replace(/\u2013/g, ', ');
+  json = json.replace(BANNED_WORDS_REGEX, '');
+  json = json.replace(/  +/g, ' ');
+  json = json.replace(/,\s*,/g, ',');
+  json = json.replace(/\.\s*,/g, '.');
+  json = json.replace(/,\s*\./g, '.');
+  json = json.replace(/\s+([.,;:])/g, '$1');
+  return JSON.parse(json);
 }
 
 // ─── GET PREVIOUS TOPICS ───
@@ -84,8 +230,8 @@ async function getPreviousTopics(vertical, apiKey) {
     const records = await queryRecords(
       AIRTABLE.tables.research,
       {
-        filterByFormula: `{vertical} = "${vertical.slug}"`,
-        sort: [{ field: 'created', direction: 'desc' }],
+        filter: { vertical: `eq.${vertical.slug}` },
+        sort: [{ field: 'created_at', direction: 'desc' }],
         maxRecords: 2
       },
       apiKey
@@ -103,6 +249,103 @@ async function getPreviousTopics(vertical, apiKey) {
     console.error('Failed to fetch previous topics:', e.message);
     return [];
   }
+}
+
+// ─── GROUNDED RESEARCH (PRIMARY PATH) ───
+
+/**
+ * Run deep research for one vertical using Gemini + Google Search grounding.
+ *
+ * Step 1: Gemini reads the web and produces a grounded report with citations.
+ * Step 2: Claude (or Gemini) structures the report into the JSON format the pipeline expects.
+ */
+async function groundedResearch(vertical, previousTopics, env) {
+  console.log(`  Using Gemini grounded research for ${vertical.name}`);
+
+  // Step 1: Grounded research call
+  const groundingPrompt = buildGroundingPrompt(vertical, previousTopics);
+  const grounded = await callGeminiGrounded(groundingPrompt, env.GEMINI_API_KEY);
+
+  console.log(`  Grounding returned ${grounded.groundingChunks.length} source chunks, ${grounded.searchQueries.length} queries`);
+
+  // Extract citation map: index -> { url, title }
+  const citations = grounded.groundingChunks.map(chunk => ({
+    url: chunk.web?.uri || '',
+    title: chunk.web?.title || '',
+    domain: chunk.web?.domain || ''
+  }));
+
+  // Step 2: Structure the grounded text + citations into JSON findings
+  const structuringPrompt = buildStructuringPrompt(
+    vertical,
+    grounded.text,
+    citations,
+    grounded.groundingSupports,
+    previousTopics
+  );
+
+  let findings = await structureFindings(structuringPrompt, env);
+  findings = cleanAISlop(findings);
+
+  return {
+    findings,
+    meta: {
+      method: 'gemini-grounded',
+      searchQueries: grounded.searchQueries,
+      citationCount: citations.length,
+      rawText: grounded.text
+    }
+  };
+}
+
+// ─── BRAVE FALLBACK RESEARCH ───
+
+async function braveResearch(vertical, previousTopics, env) {
+  console.log(`  Falling back to Brave Search for ${vertical.name}`);
+  const now = new Date();
+  const month = now.toLocaleString('en-US', { month: 'long' });
+  const year = now.getFullYear();
+
+  const queries = buildSearchQueries(vertical, month, year);
+  const searchResultSets = [];
+  for (const q of queries) {
+    const results = await braveSearch(q, env.BRAVE_API_KEY);
+    searchResultSets.push(results);
+  }
+  const allResults = searchResultSets.flat();
+
+  const seen = new Set();
+  const uniqueResults = allResults.filter(r => {
+    if (seen.has(r.url)) return false;
+    seen.add(r.url);
+    return true;
+  });
+
+  console.log(`  ${uniqueResults.length} unique results from ${queries.length} queries`);
+
+  const prompt = buildResearchPrompt(vertical, uniqueResults, previousTopics);
+  let findings;
+  try {
+    findings = await callClaude(prompt, env, { maxTokens: 4096, jsonPattern: /\[[\s\S]*\]/ });
+  } catch (claudeErr) {
+    if (env.GEMINI_API_KEY) {
+      console.warn(`Claude failed: ${claudeErr.message}. Trying Gemini.`);
+      findings = await callGeminiPlain(prompt, env.GEMINI_API_KEY, /\[[\s\S]*\]/);
+    } else {
+      throw claudeErr;
+    }
+  }
+  findings = cleanAISlop(findings);
+
+  return {
+    findings,
+    meta: {
+      method: 'brave-fallback',
+      queries,
+      rawResultCount: allResults.length,
+      uniqueResultCount: uniqueResults.length
+    }
+  };
 }
 
 // ─── MAIN RESEARCH PIPELINE ───
@@ -123,64 +366,65 @@ async function runResearchPipeline(env) {
     console.log(`Researching: ${vertical.name}`);
 
     try {
-      // Step 1: Run 5 Brave Search queries
-      const queries = buildSearchQueries(vertical, month, year);
-      const searchPromises = queries.map(q => braveSearch(q, env.BRAVE_API_KEY));
-      const searchResultSets = await Promise.all(searchPromises);
-      const allResults = searchResultSets.flat();
+      const previousTopics = await getPreviousTopics(vertical, env.SUPABASE_SERVICE_KEY);
 
-      // Deduplicate by URL
-      const seen = new Set();
-      const uniqueResults = allResults.filter(r => {
-        if (seen.has(r.url)) return false;
-        seen.add(r.url);
-        return true;
-      });
+      // Primary path: Gemini grounded research
+      // Fallback: Brave Search + LLM analysis
+      let result;
+      try {
+        if (!env.GEMINI_API_KEY) throw new Error('No GEMINI_API_KEY set');
+        result = await groundedResearch(vertical, previousTopics, env);
+      } catch (groundErr) {
+        console.warn(`  Grounded research failed: ${groundErr.message}`);
+        if (env.BRAVE_API_KEY) {
+          result = await braveResearch(vertical, previousTopics, env);
+        } else {
+          throw new Error(`Both grounded and Brave research failed. Grounding: ${groundErr.message}`);
+        }
+      }
 
-      console.log(`  ${uniqueResults.length} unique results from ${queries.length} queries`);
+      const { findings, meta } = result;
+      console.log(`  ${findings.length} findings generated via ${meta.method}`);
 
-      // Step 2: Get previous topics to avoid repeats
-      const previousTopics = await getPreviousTopics(vertical, env.AIRTABLE_API_KEY);
+      // Store in Supabase
+      let airtableRecordId = null;
+      try {
+        const airtableRecord = await createRecord(
+          AIRTABLE.tables.research,
+          {
+            vertical: vertical.slug,
+            month: `${month} ${year}`,
+            edition_number: edition,
+            findings_json: JSON.stringify(findings),
+            findings_count: findings.length,
+            status: 'generated',
+            created_at: now.toISOString()
+          },
+          env.SUPABASE_SERVICE_KEY
+        );
+        airtableRecordId = airtableRecord.id;
+        console.log(`  Supabase record: ${airtableRecordId}`);
+      } catch (dbErr) {
+        console.error(`  Supabase write failed for ${vertical.name}: ${dbErr.message}`);
+      }
 
-      // Step 3: Call Claude for structured analysis
-      const prompt = buildResearchPrompt(vertical, uniqueResults, previousTopics);
-      const findings = await callClaude(prompt, env.ANTHROPIC_API_KEY);
-
-      console.log(`  ${findings.length} findings generated`);
-
-      // Step 4: Store in Airtable
-      const airtableRecord = await createRecord(
-        AIRTABLE.tables.research,
-        {
+      // Store raw JSON in R2
+      try {
+        const r2Key = `newsletter/${vertical.slug}/${year}-${String(now.getMonth() + 1).padStart(2, '0')}/edition-${edition}/research.json`;
+        await env.NEWSLETTER_BUCKET.put(r2Key, JSON.stringify({
           vertical: vertical.slug,
-          month: `${month} ${year}`,
-          edition_number: edition,
-          findings_json: JSON.stringify(findings),
-          findings_count: findings.length,
-          status: 'generated',
-          created: now.toISOString().split('T')[0]
-        },
-        env.AIRTABLE_API_KEY
-      );
+          month, year, edition,
+          meta,
+          findings,
+          airtableRecordId,
+          generatedAt: now.toISOString()
+        }));
+        console.log(`  R2 stored: ${r2Key}`);
+      } catch (r2Err) {
+        console.error(`  R2 write failed for ${vertical.name}: ${r2Err.message}`);
+      }
 
-      console.log(`  Airtable record: ${airtableRecord.id}`);
-
-      // Step 5: Store raw JSON in R2
-      const r2Key = `newsletter/${vertical.slug}/${year}-${String(now.getMonth() + 1).padStart(2, '0')}/edition-${edition}/research.json`;
-      await env.NEWSLETTER_BUCKET.put(r2Key, JSON.stringify({
-        vertical: vertical.slug,
-        month, year, edition,
-        queries,
-        rawResultCount: allResults.length,
-        uniqueResultCount: uniqueResults.length,
-        findings,
-        airtableRecordId: airtableRecord.id,
-        generatedAt: now.toISOString()
-      }));
-
-      console.log(`  R2 stored: ${r2Key}`);
-
-      verticalResults.push({ vertical, findings, airtableRecordId: airtableRecord.id });
+      verticalResults.push({ vertical, findings, airtableRecordId });
 
     } catch (err) {
       console.error(`  FAILED for ${vertical.name}: ${err.message}`);
@@ -188,16 +432,43 @@ async function runResearchPipeline(env) {
     }
   }
 
-  // Step 6: Generate approve URL and send digest email to Biel
+  // Generate approve URLs and send digest email
   try {
+    const contentBase = 'https://newsletter-content-generator.law-firm-ai-scorer.workers.dev';
+
     const approveMessage = 'approve:defaults';
     const approveToken = await generateHmac(approveMessage, env.ANTHROPIC_API_KEY);
-    const approveUrl = `https://newsletter-content-generator.law-firm-ai-scorer.workers.dev/approve?selections=defaults&token=${approveToken}`;
+    const approveUrl = `${contentBase}/approve?selections=defaults&token=${approveToken}`;
+
+    const successfulVerticals = verticalResults.filter(v => v.findings.length > 0);
+    const selectionLinks = {};
+    for (const v of successfulVerticals) {
+      const slug = v.vertical.slug;
+      const topIndices = v.findings
+        .map((f, i) => ({ i, relevance: f.relevance }))
+        .sort((a, b) => b.relevance - a.relevance)
+        .map(x => x.i);
+
+      const combos = [];
+      for (let i = 0; i < Math.min(topIndices.length, 6); i++) {
+        const idx = topIndices[i];
+        const selectionsStr = `${slug}:${idx}`;
+        const msg = `approve:${selectionsStr}`;
+        const token = await generateHmac(msg, env.ANTHROPIC_API_KEY);
+        combos.push({
+          index: idx,
+          headline: v.findings[idx].headline,
+          url: `${contentBase}/approve?selections=${encodeURIComponent(selectionsStr)}&token=${token}`
+        });
+      }
+      selectionLinks[slug] = combos;
+    }
 
     const emailData = researchDigestEmail({
       month, year, edition,
-      verticalResults: verticalResults.filter(v => v.findings.length > 0),
-      approveUrl
+      verticalResults: successfulVerticals,
+      approveUrl,
+      selectionLinks
     });
     await sendEmail(emailData, env.RESEND_API_KEY);
     console.log('Research digest email sent');
@@ -246,7 +517,6 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/trigger') {
-      // Optional: add HMAC validation here for production
       const result = await runResearchPipeline(env);
       return new Response(JSON.stringify(result, null, 2), {
         headers: { 'Content-Type': 'application/json' }

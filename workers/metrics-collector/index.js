@@ -12,11 +12,14 @@
  *   GET  /health           - Health check
  *
  * Required env vars:
- *   BEEHIIV_API_KEY, AIRTABLE_API_KEY, RESEND_API_KEY
+ *   BEEHIIV_API_KEY, SUPABASE_SERVICE_KEY, RESEND_API_KEY
  */
 
-import { getActiveVerticals, AIRTABLE, BRAND } from '../../shared/config';
-import { createRecord } from '../../shared/airtable';
+import { getActiveVerticals, SUPABASE, BRAND } from '../../shared/config';
+import { createRecord } from '../../shared/supabase';
+
+// Use SUPABASE.tables for table name references
+const AIRTABLE = SUPABASE;
 import { sendEmail } from '../../shared/email-templates';
 
 // ─── BEEHIIV API ───

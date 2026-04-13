@@ -280,7 +280,23 @@ const BRAND = {
       'Write at a 10th-grade reading level (clarity is respect)',
       'Every paragraph earns the next one',
       'End sections with forward momentum, not summary'
-    ]
+    ],
+    antiAI: {
+      bannedVerbs: 'delve, explore (as "delve into"/"explore the"), leverage, foster, unleash, underscore, optimize, streamline, harness, empower, unlock, elevate, demystify, embark, navigate, elucidate, unravel, showcase, exemplify, propel, supercharge',
+      bannedNouns: 'tapestry, landscape (metaphorical), realm, beacon, cornerstone, testament, paradigm, metamorphosis, plethora, myriad, nuances, ecosystem (metaphorical), uncharted waters, labyrinth, embodiment, trajectory',
+      bannedAdjectives: 'cutting-edge, seamless, robust, multifaceted, dynamic (as filler), pivotal, innovative, transformative, comprehensive (as filler), profound, paramount, next-generation',
+      bannedFiller: 'actually, simply, just (as "just reaching out"), merely, essentially, ultimately, furthermore, moreover, additionally, in conclusion, to summarize, "it is important to note", "it is worth noting", "as previously mentioned", arguably, "it can be argued", "one might say"',
+      syntaxRules: [
+        'No contrastive framing: never write "It is not X, but rather Y" or "Not only X, but also Y." Make direct statements.',
+        'No tautological lists: do not stack three adjectives or verbs for one concept. Pick the most precise word.',
+        'No hedging. Commit to claims.',
+        'No artificial optimism: never end sections with uplifting generalized summaries about transformation or the future.',
+        'Narrative asymmetry: vary sentence length aggressively. Mix short punchy sentences with longer ones.',
+        'No gerund openers as filler: never open with "Navigating the complexities of..." or "Exploring the nuances of..."',
+        'No em dashes or en dashes. Restructure with commas, colons, or parentheses.',
+        'No over-bolding. No perfectly symmetrical bullet lists. Weave examples into prose.'
+      ]
+    }
   }
 };
 
@@ -332,11 +348,30 @@ function getVertical(slug) {
   return VERTICALS[slug] || null;
 }
 
+/**
+ * Supabase configuration.
+ * URL is the project REST endpoint (not a secret — safe to hardcode).
+ * The service role key is passed at runtime via env.SUPABASE_SERVICE_KEY.
+ *
+ * Find your URL at: Supabase dashboard > Settings > API > Project URL
+ * Format: https://<project-ref>.supabase.co
+ */
+const SUPABASE = {
+  url: 'https://fyzyqwzofpdtatabdgtt.supabase.co',
+  tables: {
+    research: 'Newsletter Research',   // resolves to newsletter_research in supabase.js
+    drafts:   'Newsletter Drafts',     // resolves to newsletter_drafts
+    metrics:  'Newsletter Metrics',    // resolves to newsletter_metrics
+    editions: 'Newsletter Editions',   // resolves to newsletter_editions
+  }
+};
+
 module.exports = {
   VERTICALS,
   BRAND,
   NEWSLETTER,
   AIRTABLE,
+  SUPABASE,
   WEBFLOW,
   getActiveVerticals,
   getVertical
