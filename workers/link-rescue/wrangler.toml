@@ -1,0 +1,9 @@
+name = "archificials-link-rescue"
+main = "index.js"
+compatibility_date = "2026-04-14"
+
+# Route bound to the Webflow blog path only. Assessment routes are owned by
+# archificials-assessments Workers and must not be intercepted here.
+[[routes]]
+pattern = "www.archificials.com/blog-post/*"
+zone_name = "archificials.com"

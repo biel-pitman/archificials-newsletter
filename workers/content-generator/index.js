@@ -607,29 +607,134 @@ export default {
         }
       }
 
-      // Run generation in background
+      // Pre-flight: verify research records exist for each active vertical
+      // before committing to generation. Return a clear error page if not.
       const verticals = getActiveVerticals();
+      const preflightResults = await Promise.all(
+        verticals.map(async (vertical) => {
+          try {
+            const records = await queryRecords(
+              AIRTABLE.tables.research,
+              {
+                filter: { vertical: `eq.${vertical.slug}`, status: 'eq.generated' },
+                sort: [{ field: 'created_at', direction: 'desc' }],
+                maxRecords: 1
+              },
+              env.SUPABASE_SERVICE_KEY
+            );
+            return { vertical: vertical.name, slug: vertical.slug, found: records.length > 0 };
+          } catch (err) {
+            return { vertical: vertical.name, slug: vertical.slug, found: false, error: err.message };
+          }
+        })
+      );
+
+      const missing = preflightResults.filter(r => !r.found);
+      if (missing.length > 0) {
+        const missingList = missing.map(r =>
+          `<li><strong>${r.vertical}</strong>${r.error ? `: ${r.error}` : ' (no research with status=generated)'}</li>`
+        ).join('');
+        return new Response(`
+          <html><body style="font-family: Arial, sans-serif; max-width: 640px; margin: 40px auto; padding: 20px;">
+            <h1 style="color: #c0392b;">Generation Could Not Start</h1>
+            <p>No research records with <code>status=generated</code> were found for:</p>
+            <ul>${missingList}</ul>
+            <p style="color: #666; font-size: 14px;">
+              The research engine may not have run yet, or the records were already consumed by a previous generation run.
+              Check Supabase > newsletter_research and look for rows with status=generated.
+            </p>
+            <p style="font-size: 14px;">
+              To re-trigger research: <code>POST https://newsletter-research-engine.law-firm-ai-scorer.workers.dev/trigger</code>
+            </p>
+          </body></html>
+        `, { status: 400, headers: { 'Content-Type': 'text/html' } });
+      }
+
+      // Fire each vertical as an independent POST /generate/:vertical request.
+      // This gives each its own execution context and timeout budget, rather
+      // than running all three sequentially inside one ctx.waitUntil call.
+      const workerBaseUrl = new URL(request.url).origin;
+      for (const vertical of verticals) {
+        const verticalUrl = `${workerBaseUrl}/generate/${vertical.slug}`;
+        const body = opts.selections?.[vertical.slug]
+          ? JSON.stringify({ selections: opts.selections[vertical.slug] })
+          : '{}';
+        ctx.waitUntil(
+          fetch(verticalUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body
+          }).then(async (res) => {
+            if (!res.ok) {
+              const err = await res.text();
+              console.error(`Self-invoke failed for ${vertical.slug} (${res.status}): ${err}`);
+            }
+          }).catch((err) => {
+            console.error(`Self-invoke fetch error for ${vertical.slug}: ${err.message}`);
+          })
+        );
+      }
+
+      // Legacy block kept for the error-notification path — no longer used for generation.
       const resultPromise = (async () => {
         const results = [];
+        // (generation now handled by per-vertical self-invocations above)
         for (const vertical of verticals) {
+          results.push({ vertical: vertical.name, dispatched: true });
+        }
+
+        // If every vertical failed, send an error notification email
+        const allFailed = results.every(r => r.error);
+        if (allFailed && env.RESEND_API_KEY) {
+          const errorLines = results.map(r => `<li><strong>${r.vertical}:</strong> ${r.error}</li>`).join('');
           try {
-            const result = await generateForVertical(vertical, env, {
-              selections: opts.selections?.[vertical.slug] || null
-            });
-            results.push(result);
-          } catch (err) {
-            results.push({ vertical: vertical.name, error: err.message });
+            await sendEmail({
+              from: 'Archificials Pipeline <pipeline@archificials.com>',
+              to: 'biel@archificials.com',
+              subject: 'Newsletter Generation Failed',
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; padding: 20px;">
+                  <ul>${errorLines}</ul>
+                  <p style="color:#666;font-size:13px;">Trigger manually via POST /generate to see the full error.</p>
+                </div>
+              `
+            }, env.RESEND_API_KEY);
+          } catch (emailErr) {
+            console.error(`Could not send failure notification: ${emailErr.message}`);
+          }
+        } else if (results.some(r => r.error) && env.RESEND_API_KEY) {
+          const failedLines = results
+            .filter(r => r.error)
+            .map(r => `<li><strong>${r.vertical}:</strong> ${r.error}</li>`)
+            .join('');
+          try {
+            await sendEmail({
+              from: 'Archificials Pipeline <pipeline@archificials.com>',
+              to: 'biel@archificials.com',
+              subject: 'Newsletter Generation: Partial Failure',
+              html: `
+                <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px;">
+                  <h2 style="color:#e67e22;">Some verticals failed to generate</h2>
+                  <ul>${failedLines}</ul>
+                  <p style="color:#666;font-size:13px;">Successful verticals sent their own draft emails. Re-run failed ones via POST /generate/:vertical.</p>
+                </div>
+              `
+            }, env.RESEND_API_KEY);
+          } catch (emailErr) {
+            console.error(`Could not send partial-failure notification: ${emailErr.message}`);
           }
         }
+
         return results;
       })();
       ctx.waitUntil(resultPromise);
 
       return new Response(`
-        <html><body style="font-family: Arial, sans-serif; max-width: 640px; margin: 40px auto; text-align: center;">
-          <h1 style="color: #1a1a2e;">Content Generation Started</h1>
-          <p>Drafts are being generated for all active verticals. You will receive review emails shortly.</p>
-          <p style="color: #666;">You can close this tab.</p>
+        <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:40px auto;text-align:center;">
+          <h1 style="color:#1a1a2e;">Content Generation Started</h1>
+          <p>Research records confirmed for ${verticals.length} vertical${verticals.length !== 1 ? 's' : ''}. Drafts are generating now.</p>
+          <p>You will receive a review email per vertical as each one completes. If anything fails, you will receive an error notification.</p>
+          <p style="color:#666;">You can close this tab.</p>
         </body></html>
       `, { headers: { 'Content-Type': 'text/html' } });
     }
@@ -682,7 +787,6 @@ export default {
 
       if (!vertical) {
         return new Response(JSON.stringify({ error: `Unknown vertical: ${slug}` }), {
-          status: 404,
           headers: { 'Content-Type': 'application/json' }
         });
       }
