@@ -8,7 +8,7 @@ Sibling repo to `archificials-assessments`. Same stack, same patterns.
 ## Architecture
 
 ```
-Cron (1st/10th) -> Research Engine Worker -> Brave Search + Claude API
+Cron (14th/28th) -> Research Engine Worker -> Brave Search + Claude API
                                           -> Airtable (findings)
                                           -> R2 (raw JSON)
                                           -> Email to Biel (digest)
@@ -40,7 +40,7 @@ Biel approves  -> Paste into Beehiiv + Webflow CMS (manual for now)
 ```
 archificials-newsletter/
 |-- workers/
-|   |-- research-engine/       # Cron-triggered (1st + 10th monthly)
+|   |-- research-engine/       # Cron-triggered (14th + 28th monthly)
 |   |   |-- index.js           # Main worker: Brave + Claude + Airtable + R2 + Resend
 |   |   |-- prompts.js         # Research analysis + search query builders
 |   |   +-- wrangler.toml      # Cron config + R2 binding
@@ -98,7 +98,7 @@ archificials-assessments pipeline: Worker scores -> Airtable -> Report generatio
 
 ### Research Engine (workers/research-engine/)
 
-**Trigger:** Cron at 0 8 1 * * and 0 8 10 * * (8am UTC, 1st and 10th)
+**Trigger:** Cron at 0 8 14 * * and 0 8 28 * * (8am UTC, 14th and 28th)
 **Also:** POST /trigger for manual runs
 
 Pipeline per vertical:

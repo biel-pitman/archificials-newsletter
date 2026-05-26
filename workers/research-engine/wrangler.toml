@@ -2,9 +2,10 @@ name = "newsletter-research-engine"
 main = "index.js"
 compatibility_date = "2024-12-01"
 
-# Cron triggers: 1st and 10th of each month at 8am UTC (2am CT)
+# Cron triggers: 14th and 28th of each month at 8am UTC (2am CT)
+# Timed to give ~3-7 days of prep before each bi-weekly Tuesday publication
 [triggers]
-crons = ["0 8 1 * *", "0 8 10 * *"]
+crons = ["0 8 14 * *", "0 8 28 * *"]
 
 # R2 bucket binding (same bucket can be used across workers)
 [[r2_buckets]]
