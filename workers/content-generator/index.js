@@ -650,84 +650,44 @@ export default {
         `, { status: 400, headers: { 'Content-Type': 'text/html' } });
       }
 
-      // Fire each vertical as an independent POST /generate/:vertical request.
-      // This gives each its own execution context and timeout budget, rather
-      // than running all three sequentially inside one ctx.waitUntil call.
-      const workerBaseUrl = new URL(request.url).origin;
+      // Run each vertical's generation directly in its own ctx.waitUntil promise.
+      // This avoids the self-invoke HTTP fetch pattern, which timed out before
+      // generateForVertical could complete (2-3 min wall clock for two LLM calls).
       for (const vertical of verticals) {
-        const verticalUrl = `${workerBaseUrl}/generate/${vertical.slug}`;
-        const body = opts.selections?.[vertical.slug]
-          ? JSON.stringify({ selections: opts.selections[vertical.slug] })
-          : '{}';
+        const verticalOpts = {
+          selections: opts.selections?.[vertical.slug] || null
+        };
         ctx.waitUntil(
-          fetch(verticalUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body
-          }).then(async (res) => {
-            if (!res.ok) {
-              const err = await res.text();
-              console.error(`Self-invoke failed for ${vertical.slug} (${res.status}): ${err}`);
-            }
-          }).catch((err) => {
-            console.error(`Self-invoke fetch error for ${vertical.slug}: ${err.message}`);
-          })
+          generateForVertical(vertical, env, verticalOpts)
+            .then(result => {
+              console.log(`${vertical.name}: generated "${result.subject_line}"`);
+            })
+            .catch(async (err) => {
+              console.error(`${vertical.name}: generation failed — ${err.message}`);
+              if (env.RESEND_API_KEY) {
+                try {
+                  await sendEmail({
+                    from: 'Archificials Pipeline <pipeline@archificials.com>',
+                    to: 'biel@archificials.com',
+                    subject: `Newsletter Generation Failed: ${vertical.name}`,
+                    html: `
+                      <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px;">
+                        <h2 style="color:#c0392b;">Generation failed: ${vertical.name}</h2>
+                        <p><strong>Error:</strong> ${err.message}</p>
+                        <p style="color:#666;font-size:13px;">
+                          Re-run this vertical manually:<br>
+                          <code>Invoke-WebRequest -Method POST -Uri "https://newsletter-content-generator.law-firm-ai-scorer.workers.dev/generate/${vertical.slug}" -ContentType "application/json" -Body '{}' -UseBasicParsing</code>
+                        </p>
+                      </div>
+                    `
+                  }, env.RESEND_API_KEY);
+                } catch (emailErr) {
+                  console.error(`Could not send failure notification: ${emailErr.message}`);
+                }
+              }
+            })
         );
       }
-
-      // Legacy block kept for the error-notification path — no longer used for generation.
-      const resultPromise = (async () => {
-        const results = [];
-        // (generation now handled by per-vertical self-invocations above)
-        for (const vertical of verticals) {
-          results.push({ vertical: vertical.name, dispatched: true });
-        }
-
-        // If every vertical failed, send an error notification email
-        const allFailed = results.every(r => r.error);
-        if (allFailed && env.RESEND_API_KEY) {
-          const errorLines = results.map(r => `<li><strong>${r.vertical}:</strong> ${r.error}</li>`).join('');
-          try {
-            await sendEmail({
-              from: 'Archificials Pipeline <pipeline@archificials.com>',
-              to: 'biel@archificials.com',
-              subject: 'Newsletter Generation Failed',
-              html: `
-                <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; padding: 20px;">
-                  <ul>${errorLines}</ul>
-                  <p style="color:#666;font-size:13px;">Trigger manually via POST /generate to see the full error.</p>
-                </div>
-              `
-            }, env.RESEND_API_KEY);
-          } catch (emailErr) {
-            console.error(`Could not send failure notification: ${emailErr.message}`);
-          }
-        } else if (results.some(r => r.error) && env.RESEND_API_KEY) {
-          const failedLines = results
-            .filter(r => r.error)
-            .map(r => `<li><strong>${r.vertical}:</strong> ${r.error}</li>`)
-            .join('');
-          try {
-            await sendEmail({
-              from: 'Archificials Pipeline <pipeline@archificials.com>',
-              to: 'biel@archificials.com',
-              subject: 'Newsletter Generation: Partial Failure',
-              html: `
-                <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px;">
-                  <h2 style="color:#e67e22;">Some verticals failed to generate</h2>
-                  <ul>${failedLines}</ul>
-                  <p style="color:#666;font-size:13px;">Successful verticals sent their own draft emails. Re-run failed ones via POST /generate/:vertical.</p>
-                </div>
-              `
-            }, env.RESEND_API_KEY);
-          } catch (emailErr) {
-            console.error(`Could not send partial-failure notification: ${emailErr.message}`);
-          }
-        }
-
-        return results;
-      })();
-      ctx.waitUntil(resultPromise);
 
       return new Response(`
         <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:40px auto;text-align:center;">
