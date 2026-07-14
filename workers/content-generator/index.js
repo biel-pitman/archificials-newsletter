@@ -29,7 +29,7 @@ import { createRecord, queryRecords, updateRecord } from '../../shared/supabase'
 const AIRTABLE = SUPABASE;
 import { draftReviewEmail, sendEmail } from '../../shared/email-templates';
 import { buildDraftingPrompt, buildBlogExpansionPrompt } from './prompts';
-import { lintContent, buildRewritePrompt } from '../../shared/style-lint';
+import { lintContentDeep, buildRewritePrompt } from '../../shared/style-lint';
 
 // ─── WEBFLOW CMS ───
 
@@ -304,7 +304,7 @@ function cleanAISlop(obj) {
  * all passes are returned so the review email can flag them.
  */
 async function enforceStyle(content, env, label, maxPasses = 2) {
-  let result = lintContent(content);
+  let result = await lintContentDeep(content, env);
   let passes = 0;
 
   while (!result.clean && passes < maxPasses) {
@@ -321,7 +321,7 @@ async function enforceStyle(content, env, label, maxPasses = 2) {
       break;
     }
 
-    result = lintContent(content);
+    result = await lintContentDeep(content, env);
   }
 
   if (result.clean) {

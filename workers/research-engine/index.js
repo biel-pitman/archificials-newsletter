@@ -30,7 +30,7 @@ import { createRecord, queryRecords } from '../../shared/supabase';
 const AIRTABLE = SUPABASE;
 import { researchDigestEmail, sendEmail } from '../../shared/email-templates';
 import { buildResearchPrompt, buildSearchQueries, buildGroundingPrompt, buildStructuringPrompt } from './prompts';
-import { lintContent, buildRewritePrompt } from '../../shared/style-lint';
+import { lintContentDeep, buildRewritePrompt } from '../../shared/style-lint';
 
 // ─── GEMINI WITH GOOGLE SEARCH GROUNDING ───
 
@@ -232,7 +232,7 @@ function cleanAISlop(obj) {
  * will have been through at least one corrective pass.
  */
 async function enforceFindingsStyle(findings, env, maxPasses = 2) {
-  let result = lintContent(findings);
+  let result = await lintContentDeep(findings, env);
   let passes = 0;
 
   while (!result.clean && passes < maxPasses) {
@@ -249,7 +249,7 @@ async function enforceFindingsStyle(findings, env, maxPasses = 2) {
       break;
     }
 
-    result = lintContent(findings);
+    result = await lintContentDeep(findings, env);
   }
 
   if (!result.clean) {

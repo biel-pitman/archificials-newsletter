@@ -86,6 +86,22 @@ const CONTRASTIVE_PATTERNS = [
   {
     name: '"less about X, more about Y"',
     regex: () => /\bless\s+about\b[^.!?]{1,60}\bmore\s+about\b/gi
+  },
+  {
+    name: '"has never been X. It/The-thing is Y"',
+    regex: () => /\b(?:has|have|had)\s+never\s+been\s+[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|The\s+\w+)\s+(?:is|are|was|were)\b/gi
+  },
+  {
+    name: '"is/was never (about) X. It is Y"',
+    regex: () => /\b(?:is|are|was|were)\s+never\s+(?:about\s+)?[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|The\s+\w+)\s+(?:is|are|was|were)\b/gi
+  },
+  {
+    name: 'repeated-subject pivot ("The question has never been X. The question is Y.")',
+    regex: () => /\b(?:The|A|An|Your|Our|This|That)\s+(\w+)[^.!?;:]{0,60}\b(?:not|never|no\s+longer|isn'?t|aren'?t|wasn'?t)\b[^.!?;:]{0,80}[.!?;:]\s*["'“]?\s*(?:The|Your|Our|This|That)\s+\1\s+(?:is|are|was|were|has|have)\b/gi
+  },
+  {
+    name: '"no longer about X. It is about Y"',
+    regex: () => /\bno\s+longer\s+about\s+[^.!?;:]{1,80}[.!?;:,]\s*["'“]?\s*(?:it|that|this|the\s+\w+)(?:\s+(?:is|are)|[’']s)\b/gi
   }
 ];
 
@@ -172,6 +188,105 @@ function lintContent(obj) {
   return { clean: violations.length === 0, violations };
 }
 
+// ─── SEMANTIC JUDGE (LLM pass for paraphrased contrast rhetoric) ───
+
+/**
+ * Regex catches known shapes. A model paraphrasing the same rhetorical move
+ * ("The question has never been X. The question is Y.") can dodge any fixed
+ * pattern list. This judge reads the text semantically and flags the move
+ * itself, in any wording. Uses Haiku: cheap, fast, one call per draft.
+ *
+ * Returns violations in the same shape as lintContent. Fails open: on any
+ * API error it returns [] so the pipeline never blocks on the judge.
+ */
+async function semanticLint(contentObj, env) {
+  const strings = extractStrings(contentObj)
+    .map(s => ({ path: s.path, text: stripHtml(s.text) }))
+    .filter(s => s.text.trim().split(/\s+/).length >= 12); // only prose-length fields
+
+  if (strings.length === 0) return [];
+
+  const numbered = strings.map((s, i) => `[${i}] (${s.path}): ${s.text}`).join('\n\n');
+
+  const prompt = `You are a style auditor. Find every instance of CONTRAST RHETORIC in the numbered passages below.
+
+Contrast rhetoric is the move of negating or dismissing one thing to assert another, in ANY wording. Examples of the move:
+- "It is not X, but rather Y"
+- "That is not an aspiration. It is a standard."
+- "This isn't a tool; it's a teammate."
+- "The question has never been which platform to buy. The question is how many parts of your practice you are willing to redesign."
+- "Forget X. The real issue is Y."
+- "X matters less than you think. What matters is Y."
+- "Stop asking A. Start asking B."
+- "The point was never X. The point is Y."
+All of these set up a dismissal to pivot to an assertion. All count.
+
+Do NOT flag: plain factual negations that do not pivot to a contrasting assertion (e.g. "The firm did not respond to requests."), the word "but" in ordinary use, or genuine comparisons of two named options.
+
+PASSAGES:
+${numbered}
+
+Return ONLY a JSON array. For each violation: {"index": <passage number>, "excerpt": "<the exact offending sentence or sentence pair, verbatim>"}. Return [] if there are none. No markdown, no explanation.`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!res.ok) {
+      console.warn(`Semantic lint call failed (${res.status}), continuing with regex-only`);
+      return [];
+    }
+
+    const data = await res.json();
+    const text = data.content?.[0]?.text || '[]';
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+
+    const flagged = JSON.parse(jsonMatch[0]);
+    if (!Array.isArray(flagged)) return [];
+
+    return flagged
+      .filter(f => typeof f.index === 'number' && strings[f.index] && f.excerpt)
+      .map(f => ({
+        rule: 'contrastive framing (semantic judge)',
+        field: strings[f.index].path,
+        excerpt: String(f.excerpt).slice(0, 200)
+      }));
+  } catch (err) {
+    console.warn(`Semantic lint error: ${err.message}, continuing with regex-only`);
+    return [];
+  }
+}
+
+/**
+ * Full lint: regex patterns plus semantic judge, deduplicated by field.
+ * Returns { clean, violations } like lintContent.
+ */
+async function lintContentDeep(contentObj, env) {
+  const regexResult = lintContent(contentObj);
+  const semantic = await semanticLint(contentObj, env);
+
+  // Drop semantic hits that regex already covers on the same field
+  const regexFields = new Set(regexResult.violations
+    .filter(v => v.rule.startsWith('contrastive'))
+    .map(v => v.field));
+  const extra = semantic.filter(v => !regexFields.has(v.field));
+
+  const violations = [...regexResult.violations, ...extra];
+  return { clean: violations.length === 0, violations };
+}
+
 // ─── REWRITE PROMPT ───
 
 /**
@@ -195,16 +310,18 @@ THE RULES (non-negotiable):
 
 2. NEVER use these words or variants: ${BRAND.voice.antiAI.bannedVerbs}, ${BRAND.voice.antiAI.bannedNouns}, ${BRAND.voice.antiAI.bannedAdjectives}, ${BRAND.voice.antiAI.bannedFiller}
 
-3. ZERO contrastive framing, in ANY syntactic form. All of these are the same banned move:
+3. ZERO contrastive framing, in ANY syntactic form. The banned move is: negate or dismiss one thing to assert another. All of these are the same banned move:
    - "It is not X, but rather Y"
    - "Not only X, but also Y"
    - The split-sentence version: "That is not an aspiration. It is a standard." (two sentences, same trick, still banned)
    - The semicolon version: "This isn't a tool; it's a teammate."
    - "It's not just X. It's Y."
-   HOW TO FIX: delete the negated setup entirely and state what the thing IS, directly.
+   - The paraphrased version: "The question has never been X. The question is Y." / "The point was never X. The point is Y." / "Forget X. The real issue is Y." / "Stop asking A. Start asking B."
+   HOW TO FIX: delete the negated or dismissed setup entirely and state the assertion, directly.
    Example: "That is not an aspiration. It is an enforceable competency standard." becomes "That sets an enforceable competency standard."
    Example: "Your framework is not behind the curve. It is out of compliance." becomes "Your framework is out of compliance."
-   Do NOT fix a contrast by rephrasing the negation. Remove the negation.
+   Example: "The question has never been which platform to buy. The question is how many parts of your practice you are willing to redesign around the tool you already have." becomes "The question is how many parts of your practice you are willing to redesign around the tool you already have."
+   Do NOT fix a contrast by rephrasing the negation or dismissal. Remove it. If the result reads as a bare assertion, good: that is the goal.
 
 CONTENT TO FIX:
 ${JSON.stringify(contentObj, null, 2)}
@@ -215,6 +332,8 @@ Return ONLY the corrected JSON object or array. No markdown, no code fences, no 
 module.exports = {
   lintText,
   lintContent,
+  lintContentDeep,
+  semanticLint,
   buildRewritePrompt,
   bannedWordsRegex,
   CONTRASTIVE_PATTERNS
