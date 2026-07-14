@@ -76,6 +76,14 @@ const CONTRASTIVE_PATTERNS = [
     regex: () => /\b(?:do|does|did)\s+not\s+\w+[^.!?;:]{0,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|These|Those)\s+\w+\b/gi
   },
   {
+    name: 'what-cleft pivot ("X does not require Y. What it requires is Z.")',
+    regex: () => /\b(?:do|does|did|is|are|was|were)\s+not\s+[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*What\s+(?:it|that|this|they|you|we)\s+\w+/gi
+  },
+  {
+    name: 'fragment contrast ("Not X, but Y.")',
+    regex: () => /(?:^|[.!?]\s+)["'“]?Not\s+[^.!?]{1,100},\s*but\s+/g
+  },
+  {
     name: 'split-sentence contrast with contraction ("It isn\'t X; it\'s Y.")',
     regex: () => /\b(?:isn'?t|aren'?t|wasn'?t|weren'?t)\s+(?:just\s+|only\s+|merely\s+|simply\s+|about\s+)?[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:it|that|this|they|these|those)(?:\s+(?:is|are|was|were)|[’']s|[’']re)\b/gi
   },

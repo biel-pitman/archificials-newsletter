@@ -425,6 +425,34 @@ async function generateForVertical(vertical, env, options = {}) {
 
   console.log(`Generating content: ${vertical.name}, Edition ${edition}`);
 
+  // Step 0: Idempotency guard. Cloudflare Queues can redeliver a message
+  // while a slow first attempt is still running or just finished, which
+  // produces duplicate drafts, duplicate Webflow entries, and duplicate
+  // review emails. If a draft for this vertical+edition was created in the
+  // last 30 minutes, treat this delivery as a duplicate and skip.
+  const recentDrafts = await queryRecords(
+    AIRTABLE.tables.drafts,
+    {
+      filter: { vertical: `eq.${vertical.slug}`, edition_number: `eq.${edition}` },
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      maxRecords: 1
+    },
+    env.SUPABASE_SERVICE_KEY
+  );
+  if (recentDrafts.length > 0) {
+    const createdAt = new Date(recentDrafts[0].fields.created_at || 0);
+    const ageMinutes = (Date.now() - createdAt.getTime()) / 60000;
+    if (ageMinutes < 30) {
+      console.log(`  Skipping ${vertical.slug}: draft created ${Math.round(ageMinutes)} min ago (duplicate queue delivery)`);
+      return {
+        vertical: vertical.name,
+        edition,
+        skipped: true,
+        subject_line: `(skipped: duplicate delivery, draft from ${Math.round(ageMinutes)} min ago)`
+      };
+    }
+  }
+
   // Step 1: Fetch latest research from Airtable
   let researchRecords = await queryRecords(
     AIRTABLE.tables.research,
