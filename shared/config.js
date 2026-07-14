@@ -130,7 +130,7 @@ const VERTICALS = {
   education: {
     name: 'Your AI Lecture',
     slug: 'education',
-    active: true,
+    active: false,
     beehiivPubId: 'pub_4b8dcf89-0f56-4054-926c-3eee50c250f4',
     assessmentUrl: 'https://www.archificials.com/assessment/education',
     blogCategory: 'education-ai',
@@ -287,7 +287,7 @@ const BRAND = {
       bannedAdjectives: 'cutting-edge, seamless, robust, multifaceted, dynamic (as filler), pivotal, innovative, transformative, comprehensive (as filler), profound, paramount, next-generation',
       bannedFiller: 'actually, simply, just (as "just reaching out"), merely, essentially, ultimately, furthermore, moreover, additionally, in conclusion, to summarize, "it is important to note", "it is worth noting", "as previously mentioned", arguably, "it can be argued", "one might say"',
       syntaxRules: [
-        'No contrastive framing: never write "It is not X, but rather Y" or "Not only X, but also Y." Make direct statements.',
+        'No contrastive framing, in ANY syntactic form. Banned: "It is not X, but rather Y". Banned: "Not only X, but also Y". Banned: the split-sentence version, e.g. "That is not an aspiration. It is a standard." (two sentences, same trick, still banned). Banned: the semicolon version, e.g. "This isn\'t a tool; it\'s a teammate." Banned: "It\'s not just X. It\'s Y." Fix by deleting the negated setup and stating what the thing IS: write "That sets an enforceable standard", never "That is not an aspiration. It is an enforceable standard."',
         'No tautological lists: do not stack three adjectives or verbs for one concept. Pick the most precise word.',
         'No hedging. Commit to claims.',
         'No artificial optimism: never end sections with uplifting generalized summaries about transformation or the future.',
@@ -350,7 +350,7 @@ function getVertical(slug) {
 
 /**
  * Supabase configuration.
- * URL is the project REST endpoint (not a secret — safe to hardcode).
+ * URL is the project REST endpoint (not a secret, safe to hardcode).
  * The service role key is passed at runtime via env.SUPABASE_SERVICE_KEY.
  *
  * Find your URL at: Supabase dashboard > Settings > API > Project URL

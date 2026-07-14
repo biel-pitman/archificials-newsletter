@@ -23,13 +23,14 @@
  *   NEWSLETTER_BUCKET (R2 bucket)
  */
 
-import { getActiveVerticals, BRAND, SUPABASE } from '../../shared/config';
+import { getActiveVerticals, getVertical, BRAND, SUPABASE } from '../../shared/config';
 import { createRecord, queryRecords } from '../../shared/supabase';
 
 // Use SUPABASE.tables for table name references (same keys as old AIRTABLE.tables)
 const AIRTABLE = SUPABASE;
 import { researchDigestEmail, sendEmail } from '../../shared/email-templates';
 import { buildResearchPrompt, buildSearchQueries, buildGroundingPrompt, buildStructuringPrompt } from './prompts';
+import { lintContent, buildRewritePrompt } from '../../shared/style-lint';
 
 // ─── GEMINI WITH GOOGLE SEARCH GROUNDING ───
 
@@ -223,6 +224,41 @@ function cleanAISlop(obj) {
   return JSON.parse(json);
 }
 
+// ─── STYLE ENFORCEMENT: LINT + FORCED REWRITE ───
+
+/**
+ * Lint findings. If violations are found, force a rewrite (up to maxPasses),
+ * re-linting after each pass. Survivors are logged; the digest email content
+ * will have been through at least one corrective pass.
+ */
+async function enforceFindingsStyle(findings, env, maxPasses = 2) {
+  let result = lintContent(findings);
+  let passes = 0;
+
+  while (!result.clean && passes < maxPasses) {
+    passes++;
+    console.log(`  Style lint (findings): ${result.violations.length} violation(s), rewrite pass ${passes}`);
+    result.violations.slice(0, 5).forEach(v => console.log(`    [${v.rule}] ${v.excerpt.slice(0, 90)}`));
+
+    try {
+      const rewritePrompt = buildRewritePrompt(findings, result.violations);
+      const rewritten = await structureFindings(rewritePrompt, env);
+      findings = cleanAISlop(rewritten);
+    } catch (err) {
+      console.error(`  Style rewrite failed (findings, pass ${passes}): ${err.message}`);
+      break;
+    }
+
+    result = lintContent(findings);
+  }
+
+  if (!result.clean) {
+    console.warn(`  Style lint (findings): ${result.violations.length} violation(s) SURVIVED ${passes} rewrite pass(es)`);
+  }
+
+  return findings;
+}
+
 // ─── GET PREVIOUS TOPICS ───
 
 async function getPreviousTopics(vertical, apiKey) {
@@ -286,6 +322,7 @@ async function groundedResearch(vertical, previousTopics, env) {
 
   let findings = await structureFindings(structuringPrompt, env);
   findings = cleanAISlop(findings);
+  findings = await enforceFindingsStyle(findings, env);
 
   return {
     findings,
@@ -336,6 +373,7 @@ async function braveResearch(vertical, previousTopics, env) {
     }
   }
   findings = cleanAISlop(findings);
+  findings = await enforceFindingsStyle(findings, env);
 
   return {
     findings,
@@ -348,100 +386,151 @@ async function braveResearch(vertical, previousTopics, env) {
   };
 }
 
-// ─── MAIN RESEARCH PIPELINE ───
+// ─── ENQUEUE RUN (replaces runResearchPipeline) ───
 
-async function runResearchPipeline(env) {
+/**
+ * Enqueue one message per active vertical into the research queue.
+ * Returns immediately — each vertical is processed in its own Worker invocation
+ * via the queue consumer below, avoiding waitUntil() time limits on fetch handlers.
+ */
+async function enqueueRun(env) {
   const verticals = getActiveVerticals();
   const now = new Date();
   const month = now.toLocaleString('en-US', { month: 'long' });
   const year = now.getFullYear();
-  const day = now.getDate();
-  const edition = day <= 15 ? 1 : 2;
+  const edition = now.getDate() <= 15 ? 1 : 2;
+  const runId = `${year}-${String(now.getMonth() + 1).padStart(2, '0')}-e${edition}-${Date.now()}`;
 
-  console.log(`Research pipeline starting: ${month} ${year}, Edition ${edition}`);
-
-  const verticalResults = [];
+  // Store run state in KV so the last consumer to finish can send the digest email
+  await env.RESEARCH_STATE.put(runId, JSON.stringify({
+    total: verticals.length,
+    completed: 0,
+    results: [],
+    month, year, edition,
+    startedAt: now.toISOString()
+  }), { expirationTtl: 3600 });
 
   for (const vertical of verticals) {
-    console.log(`Researching: ${vertical.name}`);
+    await env.RESEARCH_QUEUE.send({ runId, verticalSlug: vertical.slug, month, year, edition });
+  }
 
-    try {
-      const previousTopics = await getPreviousTopics(vertical, env.SUPABASE_SERVICE_KEY);
+  console.log(`Research pipeline starting: ${month} ${year}, Edition ${edition} (runId: ${runId})`);
+  return runId;
+}
 
-      // Primary path: Gemini grounded research
-      // Fallback: Brave Search + LLM analysis
-      let result;
-      try {
-        if (!env.GEMINI_API_KEY) throw new Error('No GEMINI_API_KEY set');
-        result = await groundedResearch(vertical, previousTopics, env);
-      } catch (groundErr) {
-        console.warn(`  Grounded research failed: ${groundErr.message}`);
-        if (env.BRAVE_API_KEY) {
-          result = await braveResearch(vertical, previousTopics, env);
-        } else {
-          throw new Error(`Both grounded and Brave research failed. Grounding: ${groundErr.message}`);
-        }
-      }
+// ─── PER-VERTICAL PROCESSING (called by queue consumer) ───
 
-      const { findings, meta } = result;
-      console.log(`  ${findings.length} findings generated via ${meta.method}`);
+async function processVertical(verticalSlug, month, year, edition, env) {
+  const vertical = getVertical(verticalSlug);
+  console.log(`Researching: ${vertical.name}`);
 
-      // Store in Supabase
-      let airtableRecordId = null;
-      try {
-        const airtableRecord = await createRecord(
-          AIRTABLE.tables.research,
-          {
-            vertical: vertical.slug,
-            month: `${month} ${year}`,
-            edition_number: edition,
-            findings_json: JSON.stringify(findings),
-            findings_count: findings.length,
-            status: 'generated',
-            created_at: now.toISOString()
-          },
-          env.SUPABASE_SERVICE_KEY
-        );
-        airtableRecordId = airtableRecord.id;
-        console.log(`  Supabase record: ${airtableRecordId}`);
-      } catch (dbErr) {
-        console.error(`  Supabase write failed for ${vertical.name}: ${dbErr.message}`);
-      }
+  const previousTopics = await getPreviousTopics(vertical, env.SUPABASE_SERVICE_KEY);
 
-      // Store raw JSON in R2
-      try {
-        const r2Key = `newsletter/${vertical.slug}/${year}-${String(now.getMonth() + 1).padStart(2, '0')}/edition-${edition}/research.json`;
-        await env.NEWSLETTER_BUCKET.put(r2Key, JSON.stringify({
-          vertical: vertical.slug,
-          month, year, edition,
-          meta,
-          findings,
-          airtableRecordId,
-          generatedAt: now.toISOString()
-        }));
-        console.log(`  R2 stored: ${r2Key}`);
-      } catch (r2Err) {
-        console.error(`  R2 write failed for ${vertical.name}: ${r2Err.message}`);
-      }
-
-      verticalResults.push({ vertical, findings, airtableRecordId });
-
-    } catch (err) {
-      console.error(`  FAILED for ${vertical.name}: ${err.message}`);
-      verticalResults.push({ vertical, findings: [], error: err.message });
+  let result;
+  try {
+    if (!env.GEMINI_API_KEY) throw new Error('No GEMINI_API_KEY set');
+    result = await groundedResearch(vertical, previousTopics, env);
+  } catch (groundErr) {
+    console.warn(`  Grounded research failed: ${groundErr.message}`);
+    if (env.BRAVE_API_KEY) {
+      result = await braveResearch(vertical, previousTopics, env);
+    } else {
+      throw new Error(`Both grounded and Brave research failed. Grounding: ${groundErr.message}`);
     }
   }
 
-  // Generate approve URLs and send digest email
+  const { findings, meta } = result;
+  console.log(`  ${findings.length} findings generated via ${meta.method}`);
+
+  const now = new Date();
+  let airtableRecordId = null;
+
+  try {
+    const airtableRecord = await createRecord(
+      AIRTABLE.tables.research,
+      {
+        vertical: vertical.slug,
+        month: `${month} ${year}`,
+        edition_number: edition,
+        findings_json: JSON.stringify(findings),
+        findings_count: findings.length,
+        status: 'generated',
+        created_at: now.toISOString()
+      },
+      env.SUPABASE_SERVICE_KEY
+    );
+    airtableRecordId = airtableRecord.id;
+    console.log(`  Supabase record: ${airtableRecordId}`);
+  } catch (dbErr) {
+    console.error(`  Supabase write failed for ${vertical.name}: ${dbErr.message}`);
+  }
+
+  try {
+    const r2Key = `newsletter/${vertical.slug}/${year}-${String(now.getMonth() + 1).padStart(2, '0')}/edition-${edition}/research.json`;
+    await env.NEWSLETTER_BUCKET.put(r2Key, JSON.stringify({
+      vertical: vertical.slug,
+      month, year, edition,
+      meta,
+      findings,
+      airtableRecordId,
+      generatedAt: now.toISOString()
+    }));
+    console.log(`  R2 stored: ${r2Key}`);
+  } catch (r2Err) {
+    console.error(`  R2 write failed for ${vertical.name}: ${r2Err.message}`);
+  }
+
+  return { vertical, findings, airtableRecordId };
+}
+
+// ─── RUN STATE + DIGEST EMAIL (aggregator) ───
+
+/**
+ * After each vertical finishes, update KV state.
+ * When all verticals are done, send the digest email.
+ */
+async function updateRunState(runId, result, env) {
+  const raw = await env.RESEARCH_STATE.get(runId);
+  if (!raw) {
+    console.error(`Run state missing for runId: ${runId}`);
+    return;
+  }
+
+  const state = JSON.parse(raw);
+  state.completed += 1;
+  state.results.push({
+    slug: result.vertical.slug,
+    name: result.vertical.name,
+    findings: result.findings,
+    airtableRecordId: result.airtableRecordId || null,
+    error: result.error || null
+  });
+
+  await env.RESEARCH_STATE.put(runId, JSON.stringify(state), { expirationTtl: 3600 });
+
+  if (state.completed < state.total) {
+    console.log(`Run ${runId}: ${state.completed}/${state.total} verticals complete`);
+    return;
+  }
+
+  // All verticals done — send digest email
+  console.log(`Run ${runId}: all verticals complete, sending digest`);
+  const { month, year, edition } = state;
+
+  const verticalResults = state.results.map(r => ({
+    vertical: getVertical(r.slug),
+    findings: r.findings,
+    airtableRecordId: r.airtableRecordId
+  }));
+
   try {
     const contentBase = 'https://newsletter-content-generator.law-firm-ai-scorer.workers.dev';
-
-    const approveMessage = 'approve:defaults';
-    const approveToken = await generateHmac(approveMessage, env.ANTHROPIC_API_KEY);
+    const approveToken = await generateHmac('approve:defaults', env.ANTHROPIC_API_KEY);
     const approveUrl = `${contentBase}/approve?selections=defaults&token=${approveToken}`;
 
     const successfulVerticals = verticalResults.filter(v => v.findings.length > 0);
     const selectionLinks = {};
+
     for (const v of successfulVerticals) {
       const slug = v.vertical.slug;
       const topIndices = v.findings
@@ -453,8 +542,7 @@ async function runResearchPipeline(env) {
       for (let i = 0; i < Math.min(topIndices.length, 6); i++) {
         const idx = topIndices[i];
         const selectionsStr = `${slug}:${idx}`;
-        const msg = `approve:${selectionsStr}`;
-        const token = await generateHmac(msg, env.ANTHROPIC_API_KEY);
+        const token = await generateHmac(`approve:${selectionsStr}`, env.ANTHROPIC_API_KEY);
         combos.push({
           index: idx,
           headline: v.findings[idx].headline,
@@ -475,16 +563,6 @@ async function runResearchPipeline(env) {
   } catch (err) {
     console.error(`Email send failed: ${err.message}`);
   }
-
-  return {
-    success: true,
-    month, year, edition,
-    verticals: verticalResults.map(v => ({
-      name: v.vertical.name,
-      findings: v.findings.length,
-      error: v.error || null
-    }))
-  };
 }
 
 // ─── HMAC UTILS ───
@@ -501,9 +579,9 @@ async function generateHmac(message, secret) {
 // ─── WORKER EXPORT ───
 
 export default {
-  // Cron trigger: 1st and 10th of each month at 8am UTC (2am CT)
+  // Cron trigger: 14th and 28th of each month at 8am UTC
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runResearchPipeline(env));
+    ctx.waitUntil(enqueueRun(env));
   },
 
   // HTTP trigger for manual runs and health checks
@@ -517,12 +595,37 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/trigger') {
-      const result = await runResearchPipeline(env);
-      return new Response(JSON.stringify(result, null, 2), {
+      const runId = await enqueueRun(env);
+      return new Response(JSON.stringify({
+        status: 'accepted',
+        runId,
+        message: 'Research pipeline started. Digest email will arrive when the run completes.'
+      }, null, 2), {
+        status: 202,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
     return new Response('Not Found', { status: 404 });
-  }
+  },
+
+  // Queue consumer: processes one vertical per invocation
+  async queue(batch, env) {
+    for (const message of batch.messages) {
+      const { runId, verticalSlug, month, year, edition } = message.body;
+      let findingResult;
+
+      try {
+        findingResult = await processVertical(verticalSlug, month, year, edition, env);
+      } catch (err) {
+        console.error(`FAILED ${verticalSlug}: ${err.message}`);
+        const { getVertical } = require('../../shared/config');
+        findingResult = { vertical: getVertical(verticalSlug), findings: [], error: err.message };
+      }
+
+      // Always ack so failed verticals don't block the queue forever
+      message.ack();
+      await updateRunState(runId, findingResult, env);
+    }
+  },
 };

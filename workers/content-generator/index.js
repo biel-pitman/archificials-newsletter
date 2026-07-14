@@ -29,6 +29,7 @@ import { createRecord, queryRecords, updateRecord } from '../../shared/supabase'
 const AIRTABLE = SUPABASE;
 import { draftReviewEmail, sendEmail } from '../../shared/email-templates';
 import { buildDraftingPrompt, buildBlogExpansionPrompt } from './prompts';
+import { lintContent, buildRewritePrompt } from '../../shared/style-lint';
 
 // ─── WEBFLOW CMS ───
 
@@ -294,6 +295,44 @@ function cleanAISlop(obj) {
   return JSON.parse(json);
 }
 
+// ─── STYLE ENFORCEMENT: LINT + FORCED REWRITE ───
+
+/**
+ * Lint generated content. If violations are found, send it back to the LLM
+ * for a surgical rewrite (up to maxPasses times), re-linting after each pass.
+ * Returns { content, violations, rewritePasses }. Violations that survive
+ * all passes are returned so the review email can flag them.
+ */
+async function enforceStyle(content, env, label, maxPasses = 2) {
+  let result = lintContent(content);
+  let passes = 0;
+
+  while (!result.clean && passes < maxPasses) {
+    passes++;
+    console.log(`  Style lint (${label}): ${result.violations.length} violation(s), rewrite pass ${passes}`);
+    result.violations.slice(0, 5).forEach(v => console.log(`    [${v.rule}] ${v.excerpt.slice(0, 90)}`));
+
+    try {
+      const rewritePrompt = buildRewritePrompt(content, result.violations);
+      const rewritten = await callLLM(rewritePrompt, env, { maxTokens: 8192, jsonPattern: /[\{\[][\s\S]*[\}\]]/ });
+      content = cleanAISlop(rewritten);
+    } catch (err) {
+      console.error(`  Style rewrite failed (${label}, pass ${passes}): ${err.message}`);
+      break;
+    }
+
+    result = lintContent(content);
+  }
+
+  if (result.clean) {
+    console.log(`  Style lint (${label}): clean${passes > 0 ? ` after ${passes} rewrite pass(es)` : ''}`);
+  } else {
+    console.warn(`  Style lint (${label}): ${result.violations.length} violation(s) SURVIVED ${passes} rewrite pass(es), flagging in review email`);
+  }
+
+  return { content, violations: result.clean ? [] : result.violations, rewritePasses: passes };
+}
+
 // ─── URL VALIDATION ───
 
 async function validateUrl(url) {
@@ -422,7 +461,7 @@ async function generateForVertical(vertical, env, options = {}) {
   console.log(`Generating content: ${vertical.name}, Edition ${edition}`);
 
   // Step 1: Fetch latest research from Airtable
-  const researchRecords = await queryRecords(
+  let researchRecords = await queryRecords(
     AIRTABLE.tables.research,
     {
       filter: { vertical: `eq.${vertical.slug}`, status: 'eq.generated' },
@@ -431,6 +470,21 @@ async function generateForVertical(vertical, env, options = {}) {
     },
     env.SUPABASE_SERVICE_KEY
   );
+
+  // Regeneration path: no fresh research, but caller asked to reuse the
+  // latest consumed record (e.g. re-running after a bad draft).
+  if (researchRecords.length === 0 && options.reuseLatest) {
+    console.log(`  No generated research for ${vertical.slug}, reusing latest consumed record`);
+    researchRecords = await queryRecords(
+      AIRTABLE.tables.research,
+      {
+        filter: { vertical: `eq.${vertical.slug}`, status: 'eq.consumed' },
+        sort: [{ field: 'created_at', direction: 'desc' }],
+        maxRecords: 1
+      },
+      env.SUPABASE_SERVICE_KEY
+    );
+  }
 
   if (researchRecords.length === 0) {
     throw new Error(`No research found for ${vertical.slug}. Run research-engine first.`);
@@ -456,6 +510,10 @@ async function generateForVertical(vertical, env, options = {}) {
   draft = cleanAISlop(draft);
   console.log(`  Newsletter draft generated: "${draft.subject_line}"`);
 
+  // Step 4a: Enforce style rules (lint + forced rewrite)
+  const draftStyle = await enforceStyle(draft, env, 'newsletter');
+  draft = draftStyle.content;
+
   // Step 4b: Validate source URLs
   const linkValidation = await extractAndValidateUrls(draft);
   if (linkValidation.broken.length > 0) {
@@ -470,6 +528,16 @@ async function generateForVertical(vertical, env, options = {}) {
   let blogPost = await callLLM(blogPrompt, env, { maxTokens: 8192, jsonPattern: /\{[\s\S]*\}/ });
   blogPost = cleanAISlop(blogPost);
   console.log(`  Blog expansion generated: "${blogPost.seo_title}" (${blogPost.word_count} words)`);
+
+  // Step 5a: Enforce style rules on the blog post
+  const blogStyle = await enforceStyle(blogPost, env, 'blog');
+  blogPost = blogStyle.content;
+
+  // Collect surviving violations for the review email
+  const styleViolations = [
+    ...draftStyle.violations.map(v => ({ ...v, where: 'Newsletter' })),
+    ...blogStyle.violations.map(v => ({ ...v, where: 'Blog' }))
+  ];
 
   // Step 5b: Create Webflow blog draft
   let webflowResult = null;
@@ -539,7 +607,7 @@ async function generateForVertical(vertical, env, options = {}) {
   // Step 8: Email Biel the draft
   const emailData = draftReviewEmail({
     vertical, edition, month, year, draft, blogPost, linkValidation,
-    webflowResult, beehiivResult
+    webflowResult, beehiivResult, styleViolations
   });
   await sendEmail(emailData, env.RESEND_API_KEY);
 
@@ -552,6 +620,32 @@ async function generateForVertical(vertical, env, options = {}) {
     beehiiv_draft: beehiivResult?.postId || null,
     airtableRecordId: draftRecord.id
   };
+}
+
+// ─── FAILURE NOTIFICATION ───
+
+async function notifyFailure(vertical, err, env) {
+  console.error(`${vertical.name}: generation failed — ${err.message}`);
+  if (!env.RESEND_API_KEY) return;
+  try {
+    await sendEmail({
+      from: 'Archificials Pipeline <pipeline@archificials.com>',
+      to: 'biel@archificials.com',
+      subject: `Newsletter Generation Failed: ${vertical.name}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px;">
+          <h2 style="color:#c0392b;">Generation failed: ${vertical.name}</h2>
+          <p><strong>Error:</strong> ${err.message}</p>
+          <p style="color:#666;font-size:13px;">
+            Re-run this vertical manually:<br>
+            <code>curl -X POST https://newsletter-content-generator.law-firm-ai-scorer.workers.dev/generate/${vertical.slug}</code>
+          </p>
+        </div>
+      `
+    }, env.RESEND_API_KEY);
+  } catch (emailErr) {
+    console.error(`Could not send failure notification: ${emailErr.message}`);
+  }
 }
 
 // ─── HMAC UTILS ───
@@ -650,43 +744,14 @@ export default {
         `, { status: 400, headers: { 'Content-Type': 'text/html' } });
       }
 
-      // Run each vertical's generation directly in its own ctx.waitUntil promise.
-      // This avoids the self-invoke HTTP fetch pattern, which timed out before
-      // generateForVertical could complete (2-3 min wall clock for two LLM calls).
+      // Enqueue one message per vertical. Queue consumer runs with a 15-min
+      // budget vs. the 30-second wall-clock limit on HTTP waitUntil().
       for (const vertical of verticals) {
-        const verticalOpts = {
+        await env.NEWSLETTER_QUEUE.send({
+          vertical: vertical.slug,
           selections: opts.selections?.[vertical.slug] || null
-        };
-        ctx.waitUntil(
-          generateForVertical(vertical, env, verticalOpts)
-            .then(result => {
-              console.log(`${vertical.name}: generated "${result.subject_line}"`);
-            })
-            .catch(async (err) => {
-              console.error(`${vertical.name}: generation failed — ${err.message}`);
-              if (env.RESEND_API_KEY) {
-                try {
-                  await sendEmail({
-                    from: 'Archificials Pipeline <pipeline@archificials.com>',
-                    to: 'biel@archificials.com',
-                    subject: `Newsletter Generation Failed: ${vertical.name}`,
-                    html: `
-                      <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px;">
-                        <h2 style="color:#c0392b;">Generation failed: ${vertical.name}</h2>
-                        <p><strong>Error:</strong> ${err.message}</p>
-                        <p style="color:#666;font-size:13px;">
-                          Re-run this vertical manually:<br>
-                          <code>Invoke-WebRequest -Method POST -Uri "https://newsletter-content-generator.law-firm-ai-scorer.workers.dev/generate/${vertical.slug}" -ContentType "application/json" -Body '{}' -UseBasicParsing</code>
-                        </p>
-                      </div>
-                    `
-                  }, env.RESEND_API_KEY);
-                } catch (emailErr) {
-                  console.error(`Could not send failure notification: ${emailErr.message}`);
-                }
-              }
-            })
-        );
+        });
+        console.log(`Enqueued: ${vertical.slug}`);
       }
 
       return new Response(`
@@ -708,36 +773,23 @@ export default {
 
     // Generate for all active verticals
     if (request.method === 'POST' && url.pathname === '/generate') {
-      try {
-        const body = request.headers.get('content-type')?.includes('json')
-          ? await request.json()
-          : {};
+      const body = request.headers.get('content-type')?.includes('json')
+        ? await request.json().catch(() => ({}))
+        : {};
 
-        const verticals = getActiveVerticals();
-        const results = [];
-
-        for (const vertical of verticals) {
-          try {
-            const result = await generateForVertical(vertical, env, {
-              edition: body.edition || undefined,
-              selections: body.selections?.[vertical.slug] || null
-            });
-            results.push(result);
-          } catch (err) {
-            console.error(`Failed for ${vertical.name}: ${err.message}`);
-            results.push({ vertical: vertical.name, error: err.message });
-          }
-        }
-
-        return new Response(JSON.stringify({ success: true, results }, null, 2), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' }
+      const verticals = getActiveVerticals();
+      for (const vertical of verticals) {
+        await env.NEWSLETTER_QUEUE.send({
+          vertical: vertical.slug,
+          selections: body.selections?.[vertical.slug] || null,
+          edition: body.edition || undefined,
+          reuseLatest: body.reuseLatest || false
         });
       }
+
+      return new Response(JSON.stringify({ status: 'queued', verticals: verticals.map(v => v.slug) }, null, 2), {
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
     // Generate for a single vertical
@@ -747,31 +799,60 @@ export default {
 
       if (!vertical) {
         return new Response(JSON.stringify({ error: `Unknown vertical: ${slug}` }), {
+          status: 400,
           headers: { 'Content-Type': 'application/json' }
         });
       }
 
-      try {
-        const body = request.headers.get('content-type')?.includes('json')
-          ? await request.json()
-          : {};
+      const body = request.headers.get('content-type')?.includes('json')
+        ? await request.json().catch(() => ({}))
+        : {};
 
-        const result = await generateForVertical(vertical, env, {
-          edition: body.edition || undefined,
-          selections: body.selections || null
-        });
+      await env.NEWSLETTER_QUEUE.send({
+        vertical: vertical.slug,
+        selections: body.selections || null,
+        edition: body.edition || undefined,
+        reuseLatest: body.reuseLatest || false
+      });
 
-        return new Response(JSON.stringify({ success: true, result }, null, 2), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
+      return new Response(JSON.stringify({ status: 'queued', vertical: vertical.slug }, null, 2), {
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
     return new Response('Not Found', { status: 404 });
+  },
+
+  async scheduled(event, env, ctx) {
+    console.log(`Scheduled content generation triggered: ${new Date().toISOString()}`);
+    const verticals = getActiveVerticals();
+    for (const vertical of verticals) {
+      ctx.waitUntil(
+        generateForVertical(vertical, env)
+          .then(r => console.log(`Scheduled: ${vertical.name} done — "${r.subject_line}"`))
+          .catch(err => notifyFailure(vertical, err, env))
+      );
+    }
+  },
+
+  async queue(batch, env) {
+    for (const message of batch.messages) {
+      const { vertical: slug, selections, edition, reuseLatest } = message.body;
+      const vertical = getVertical(slug);
+      if (!vertical) {
+        console.error(`Unknown vertical in queue message: ${slug}`);
+        message.ack();
+        continue;
+      }
+      console.log(`Queue processing: ${vertical.name}`);
+      try {
+        const result = await generateForVertical(vertical, env, { selections, edition, reuseLatest });
+        console.log(`Queue done: ${vertical.name} — "${result.subject_line}"`);
+        message.ack();
+      } catch (err) {
+        await notifyFailure(vertical, err, env);
+        message.retry({ delaySeconds: 60 });
+      }
+    }
   }
 };

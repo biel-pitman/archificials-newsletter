@@ -83,7 +83,7 @@ function researchDigestEmail({ month, year, edition, verticalResults, approveUrl
  * Draft review email - sent after content generation completes.
  * Contains the full newsletter draft ready to paste into Beehiiv.
  */
-function draftReviewEmail({ vertical, edition, month, year, draft, blogPost, linkValidation, webflowResult, beehiivResult }) {
+function draftReviewEmail({ vertical, edition, month, year, draft, blogPost, linkValidation, webflowResult, beehiivResult, styleViolations = [] }) {
   // Determine blog URL: prefer Webflow result, fall back to draft value
   const blogUrl = webflowResult?.blogUrl || draft.anchor?.blog_url || null;
 
@@ -143,6 +143,17 @@ function draftReviewEmail({ vertical, edition, month, year, draft, blogPost, lin
         <p style="color: #666; font-size: 14px; margin-top: 0;">
           Edition ${edition}, ${month} ${year}. Review below and reply with edits or "approve" to mark as ready.
         </p>
+        ${styleViolations.length > 0 ? `
+        <div style="background: #f8d7da; padding: 14px; border-radius: 4px; margin-bottom: 16px; border: 2px solid #dc3545;">
+          <p style="margin: 0 0 6px 0; font-size: 14px; color: #721c24;">
+            <strong>STYLE VIOLATIONS SURVIVED REWRITE (${styleViolations.length}). Fix these by hand before publishing:</strong>
+          </p>
+          ${styleViolations.map(v => `
+          <p style="margin: 4px 0; font-size: 13px; color: #721c24;">
+            [${v.where}] ${v.rule} in <code>${v.field}</code>:<br>
+            <em>"${v.excerpt}"</em>
+          </p>`).join('')}
+        </div>` : ''}
         ${beehiivResult ? `
         <div style="background: #d4edda; padding: 12px; border-radius: 4px; margin-bottom: 16px;">
           <p style="margin: 0; font-size: 13px; color: #155724;">
