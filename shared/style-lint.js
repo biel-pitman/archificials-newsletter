@@ -208,20 +208,29 @@ async function semanticLint(contentObj, env) {
 
   const numbered = strings.map((s, i) => `[${i}] (${s.path}): ${s.text}`).join('\n\n');
 
-  const prompt = `You are a style auditor. Find every instance of CONTRAST RHETORIC in the numbered passages below.
+  const prompt = `You are a style auditor with a HIGH PRECISION requirement. Find instances of CONTRAST RHETORIC in the numbered passages below. A false flag is worse than a miss: when in doubt, do NOT flag.
 
-Contrast rhetoric is the move of negating or dismissing one thing to assert another, in ANY wording. Examples of the move:
+Contrast rhetoric requires BOTH of these, together:
+(a) an explicit negation or dismissal word (not, never, isn't, no longer, neither, forget, stop), AND
+(b) a pivot to a contrasting assertion of what the thing really is.
+
+Examples that COUNT (negation + pivot):
 - "It is not X, but rather Y"
 - "That is not an aspiration. It is a standard."
 - "This isn't a tool; it's a teammate."
 - "The question has never been which platform to buy. The question is how many parts of your practice you are willing to redesign."
 - "Forget X. The real issue is Y."
-- "X matters less than you think. What matters is Y."
 - "Stop asking A. Start asking B."
-- "The point was never X. The point is Y."
-All of these set up a dismissal to pivot to an assertion. All count.
+- "The Calendar Is Not a Suggestion" (headline negation implying the pivot)
 
-Do NOT flag: plain factual negations that do not pivot to a contrasting assertion (e.g. "The firm did not respond to requests."), the word "but" in ordinary use, or genuine comparisons of two named options.
+Examples that DO NOT COUNT (do not flag these or anything like them):
+- "A written framework provides proof." (plain assertion, no negation)
+- "These laws convert internal best practices into binding compliance obligations." (plain assertion)
+- "Firms are using these tools. Many are not documenting how." (factual observation; the negation reports a fact, it does not dismiss a framing to pivot)
+- "The firm did not respond to requests." (factual negation)
+- "Scrambling later is harder than building now." (comparison, no negation-pivot)
+- "The firms that handle this well are the ones building policies. The ones that wait are creating exposure." (comparison of two groups, no dismissal)
+- Ordinary use of "but"
 
 PASSAGES:
 ${numbered}
@@ -256,8 +265,14 @@ Return ONLY a JSON array. For each violation: {"index": <passage number>, "excer
     const flagged = JSON.parse(jsonMatch[0]);
     if (!Array.isArray(flagged)) return [];
 
+    // Mechanical precision gate: a contrast pivot requires an explicit
+    // negation or dismissal cue. Judge flags without one are false positives
+    // by definition, so they are dropped regardless of the judge's opinion.
+    const NEGATION_CUE = /\b(?:not|never|isn'?t|aren'?t|wasn'?t|weren'?t|doesn'?t|don'?t|won'?t|can'?t|no\s+longer|neither|nor|forget|stop\s+(?:asking|thinking|treating)|rather|instead)\b/i;
+
     return flagged
       .filter(f => typeof f.index === 'number' && strings[f.index] && f.excerpt)
+      .filter(f => NEGATION_CUE.test(String(f.excerpt)))
       .map(f => ({
         rule: 'contrastive framing (semantic judge)',
         field: strings[f.index].path,
