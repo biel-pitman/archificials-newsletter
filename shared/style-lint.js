@@ -60,6 +60,14 @@ const CONTRASTIVE_PATTERNS = [
     regex: () => /\b(?:is|are|was|were|it'?s|that'?s|this\s+is)\s+not\s+[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|These|Those)(?:\s+(?:is|are|was|were)|[’']s|[’']re)\b/gi
   },
   {
+    name: 'split-sentence contrast with any verb ("X is not Y. It reflects Z.")',
+    regex: () => /\b(?:is|are|was|were|it'?s|that'?s|this\s+is)\s+not\s+[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|These|Those)\s+\w+\b/gi
+  },
+  {
+    name: 'do-support contrast ("X does not replace Y. They add Z.")',
+    regex: () => /\b(?:do|does|did)\s+not\s+\w+[^.!?;:]{0,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|These|Those)\s+\w+\b/gi
+  },
+  {
     name: 'split-sentence contrast with contraction ("It isn\'t X; it\'s Y.")',
     regex: () => /\b(?:isn'?t|aren'?t|wasn'?t|weren'?t)\s+(?:just\s+|only\s+|merely\s+|simply\s+|about\s+)?[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:it|that|this|they|these|those)(?:\s+(?:is|are|was|were)|[’']s|[’']re)\b/gi
   },
