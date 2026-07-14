@@ -183,44 +183,16 @@ async function structureFindings(prompt, env) {
   }
 }
 
-// ─── POST-PROCESSING: BANNED WORDS ───
-
-const BANNED_WORDS_REGEX = new RegExp(
-  '\\b(' + [
-    'delves?', 'delving', 'leverag(?:es?|ing|ed)', 'fosters?', 'fostering',
-    'unleash(?:es|ing|ed)?', 'underscores?', 'underscoring',
-    'optimiz(?:es?|ing|ed)', 'streamlin(?:es?|ing|ed)',
-    'harness(?:es|ing|ed)?', 'empowers?', 'empowering',
-    'unlocks?', 'unlocking', 'elevat(?:es?|ing|ed)',
-    'demystif(?:y|ies|ying|ied)', 'embarks?', 'embarking',
-    'navigat(?:es?|ing|ed)', 'elucidat(?:es?|ing|ed)',
-    'unravel(?:s|ing|ed)?', 'showcas(?:es?|ing|ed)',
-    'exemplif(?:y|ies|ying|ied)', 'propel(?:s|ling|led)?',
-    'supercharg(?:es?|ing|ed)',
-    'tapestry', 'tapestries', 'landscape(?:s)?', 'realm(?:s)?',
-    'beacon(?:s)?', 'cornerstone(?:s)?', 'testament',
-    'paradigm(?:s)?', 'metamorphos(?:is|es)', 'plethora',
-    'myriad', 'nuance(?:s|d)?', 'ecosystem(?:s)?',
-    'labyrinth(?:s)?', 'embodiment', 'trajectory', 'trajectories',
-    'cutting-edge', 'seamless(?:ly)?', 'robust(?:ly)?',
-    'multifaceted', 'pivotal(?:ly)?', 'innovative(?:ly)?',
-    'transformative(?:ly)?', 'profound(?:ly)?',
-    'paramount', 'next-generation',
-    'actually', 'simply', 'merely', 'essentially', 'ultimately',
-    'furthermore', 'moreover', 'additionally', 'arguably'
-  ].join('|') + ')\\b',
-  'gi'
-);
+// ─── POST-PROCESSING: EM DASHES ───
+//
+// Banned words are NOT deleted here: blind regex deletion mangles grammar
+// ("The landscape there is" becomes "The there is"). The lint + rewrite
+// loop fixes them grammatically; survivors get flagged.
 
 function cleanAISlop(obj) {
   let json = JSON.stringify(obj);
   json = json.replace(/\u2014/g, ', ').replace(/\u2013/g, ', ');
-  json = json.replace(BANNED_WORDS_REGEX, '');
-  json = json.replace(/  +/g, ' ');
   json = json.replace(/,\s*,/g, ',');
-  json = json.replace(/\.\s*,/g, '.');
-  json = json.replace(/,\s*\./g, '.');
-  json = json.replace(/\s+([.,;:])/g, '$1');
   return JSON.parse(json);
 }
 

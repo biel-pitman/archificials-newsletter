@@ -64,6 +64,14 @@ const CONTRASTIVE_PATTERNS = [
     regex: () => /\b(?:is|are|was|were|it'?s|that'?s|this\s+is)\s+not\s+[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|These|Those)\s+\w+\b/gi
   },
   {
+    name: 'first/second-person split contrast ("I am not X. I am Y.")',
+    regex: () => /\b(?:am|are|'m|'re)\s+not\s+[^.!?;:]{1,80}[.!?;:]\s*["'“]?\s*(?:I|We|You)\s+(?:am|are|'m|'re|\w+ing)\b/g
+  },
+  {
+    name: 'trailing contrast tag ("X, not Y.")',
+    regex: () => /,\s+not\s+(?:a|an|the|just|merely)?\s*[\w-]+(?:\s+[\w-]+)?\s*[.!?]/gi
+  },
+  {
     name: 'do-support contrast ("X does not replace Y. They add Z.")',
     regex: () => /\b(?:do|does|did)\s+not\s+\w+[^.!?;:]{0,80}[.!?;:]\s*["'“]?\s*(?:It|That|This|They|These|Those)\s+\w+\b/gi
   },

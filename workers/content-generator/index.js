@@ -243,54 +243,19 @@ async function callLLM(prompt, env, { maxTokens = 8192, jsonPattern = /\{[\s\S]*
   throw lastError;
 }
 
-// ─── POST-PROCESSING: EM DASHES + BANNED WORDS ───
-
-const BANNED_WORDS_REGEX = new RegExp(
-  '\\b(' + [
-    // Verbs
-    'delves?', 'delving', 'leverag(?:es?|ing|ed)', 'fosters?', 'fostering',
-    'unleash(?:es|ing|ed)?', 'underscores?', 'underscoring',
-    'optimiz(?:es?|ing|ed)', 'streamlin(?:es?|ing|ed)',
-    'harness(?:es|ing|ed)?', 'empowers?', 'empowering',
-    'unlocks?', 'unlocking', 'elevat(?:es?|ing|ed)',
-    'demystif(?:y|ies|ying|ied)', 'embarks?', 'embarking',
-    'navigat(?:es?|ing|ed)', 'elucidat(?:es?|ing|ed)',
-    'unravel(?:s|ing|ed)?', 'showcas(?:es?|ing|ed)',
-    'exemplif(?:y|ies|ying|ied)', 'propel(?:s|ling|led)?',
-    'supercharg(?:es?|ing|ed)',
-    // Nouns
-    'tapestry', 'tapestries', 'landscape(?:s)?', 'realm(?:s)?',
-    'beacon(?:s)?', 'cornerstone(?:s)?', 'testament',
-    'paradigm(?:s)?', 'metamorphos(?:is|es)', 'plethora',
-    'myriad', 'nuance(?:s|d)?', 'ecosystem(?:s)?',
-    'labyrinth(?:s)?', 'embodiment', 'trajectory', 'trajectories',
-    // Adjectives
-    'cutting-edge', 'seamless(?:ly)?', 'robust(?:ly)?',
-    'multifaceted', 'pivotal(?:ly)?', 'innovative(?:ly)?',
-    'transformative(?:ly)?', 'profound(?:ly)?',
-    'paramount', 'next-generation',
-    // Filler
-    'actually', 'simply', 'merely', 'essentially', 'ultimately',
-    'furthermore', 'moreover', 'additionally', 'arguably'
-  ].join('|') + ')\\b',
-  'gi'
-);
+// ─── POST-PROCESSING: EM DASHES ───
 
 function cleanAISlop(obj) {
   let json = JSON.stringify(obj);
 
-  // Em dashes and en dashes
+  // Em dashes and en dashes are safe to replace mechanically.
   json = json.replace(/\u2014/g, ', ').replace(/\u2013/g, ', ');
-
-  // Banned words: remove them and clean up leftover grammar artifacts
-  json = json.replace(BANNED_WORDS_REGEX, '');
-
-  // Clean up double spaces, orphaned commas, leading commas after periods
-  json = json.replace(/  +/g, ' ');
   json = json.replace(/,\s*,/g, ',');
-  json = json.replace(/\.\s*,/g, '.');
-  json = json.replace(/,\s*\./g, '.');
-  json = json.replace(/\s+([.,;:])/g, '$1');
+
+  // Banned words are NOT deleted here: blind regex deletion mangles grammar
+  // ("The landscape there is" becomes "The there is"). The lint + rewrite
+  // loop fixes banned words grammatically; survivors get flagged in the
+  // review email.
 
   return JSON.parse(json);
 }
