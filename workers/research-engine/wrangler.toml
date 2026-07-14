@@ -12,6 +12,25 @@ crons = ["0 8 14 * *", "0 8 28 * *"]
 binding = "NEWSLETTER_BUCKET"
 bucket_name = "archificials-newsletter"
 
+# Queue producer: /trigger and scheduled handlers enqueue one message per vertical
+[[queues.producers]]
+binding = "RESEARCH_QUEUE"
+queue = "newsletter-research-queue"
+
+# Queue consumer: one vertical per invocation, each gets its own wall-clock budget
+[[queues.consumers]]
+queue = "newsletter-research-queue"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 2
+dead_letter_queue = "newsletter-research-dlq"
+
+# KV namespace: tracks run state (completed verticals) so the last one sends the digest email
+# Replace the id below with the output of: npx wrangler kv namespace create newsletter-research-state
+[[kv_namespaces]]
+binding = "RESEARCH_STATE"
+id = "ba098ce4093f4f29ba4652ed3308840d"
+
 # Environment variables (non-secret)
 [vars]
 WORKER_NAME = "research-engine"

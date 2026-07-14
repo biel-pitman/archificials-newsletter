@@ -2,11 +2,22 @@ name = "newsletter-content-generator"
 main = "index.js"
 compatibility_date = "2024-12-01"
 
-# No cron - triggered via HTTP POST after research review
+[triggers]
+crons = ["0 10 14 * *", "0 10 28 * *"]  # 10am UTC, 14th + 28th (2h after research engine)
 
 [[r2_buckets]]
 binding = "NEWSLETTER_BUCKET"
 bucket_name = "archificials-newsletter"
+
+[[queues.producers]]
+binding = "NEWSLETTER_QUEUE"
+queue = "newsletter-generation"
+
+[[queues.consumers]]
+queue = "newsletter-generation"
+max_batch_size = 1      # One vertical per invocation — full 15-min budget each
+max_batch_timeout = 0   # Process immediately, don't wait to batch
+max_retries = 2         # Retry twice on failure before dead-lettering
 
 [vars]
 WORKER_NAME = "content-generator"
